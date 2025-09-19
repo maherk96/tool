@@ -1,6 +1,8 @@
 spring:
   application:
     name: spring-load
+server:
+  port: 8012
 
 load:
   tasks:
