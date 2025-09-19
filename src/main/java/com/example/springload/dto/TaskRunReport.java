@@ -8,54 +8,26 @@ import java.util.Map;
 public class TaskRunReport {
     public enum ModelKind { OPEN, CLOSED }
 
-    // 1. General Task Metadata
+    // Core identifiers and timing
     public String taskId;
     public String taskType;
     public ModelKind model;
-    public Instant startTime;
-    public Instant endTime;
-    public Duration duration;
+    public Instant startTime; // ISO-8601 UTC
+    public Instant endTime;   // ISO-8601 UTC
+    public double durationSec; // numeric seconds for easy calc
+
+    // Environment
     public EnvInfo environment;
-    public Duration warmup;
-    public Duration rampUp;
-    public Duration holdFor;
-    public int usersStarted;
-    public int usersCompleted;
 
-    // 2. Load Configuration Summary
-    public Integer users; // closed
-    public Integer iterationsPerUser; // closed
-    public Double arrivalRatePerSec; // open
-    public Duration openDuration; // open
-    public int requestsPerIteration;
-    public long expectedTotalRequests;
-    public Double expectedRps;
+    // Configuration vs Metrics
+    public Config config;
+    public Metrics metrics;
 
-    // 3. Execution Metrics (overall)
-    public long totalRequests;
-    public long totalSucceeded;
-    public long totalFailed;
-    public double successRate;
-    public double achievedRps;
-    public Long latencyAvgMs;
-    public Long latencyMinMs;
-    public Long latencyMaxMs;
-    public Long latencyP95Ms;
-    public Long latencyP99Ms;
-    public Map<String, Long> errorBreakdown;
+    // Time-series snapshots and protocol specific details
+    public List<TimeSeriesEntry> timeseries;
+    public ProtocolDetails protocolDetails;
 
-    // User-level stats
-    public double avgIterationsPerUser;
-    public Long minUserCompletionMillis;
-    public Long maxUserCompletionMillis;
-    public List<Integer> usersNotCompleted;
-
-    // 4. Time-Series Data
-    public List<TimeWindow> timeseries;
-
-    // 5. Protocol-Specific Data (REST only for now)
-    public List<RestEndpointStats> restEndpoints;
-
+    // --- Nested Types ---
     public static class EnvInfo {
         public String branch;
         public String commit;
@@ -63,27 +35,85 @@ public class TaskRunReport {
         public String triggeredBy;
     }
 
-    public static class TimeWindow {
-        public Instant timestamp;
-        public long usersCompleted;
+    public static class Config {
+        public Integer users; // closed
+        public Integer iterationsPerUser; // closed
+        public Integer requestsPerIteration;
+        public Duration warmup;
+        public Duration rampUp;
+        public Duration holdFor;
+        public Double arrivalRatePerSec; // open
+        public Duration openDuration;     // open
+        public long expectedTotalRequests;
+        public Double expectedRps; // target
+    }
+
+    public static class Metrics {
         public long totalRequests;
+        public long successCount;
+        public long failureCount;
+        public double successRate;
+        public double achievedRps;
+        public Latency latency;
+        public List<ErrorItem> errorBreakdown;
+        public List<UserCompletion> userCompletionHistogram; // optional
+        public int usersStarted;
+        public int usersCompleted;
+        public Double expectedRps; // mirror target for convenience
+    }
+
+    public static class Latency {
+        public Long min;
+        public Long avg;
+        public Long max;
+        public Long p95;
+        public Long p99;
+    }
+
+    public static class ErrorItem {
+        public String type;
+        public long count;
+    }
+
+    public static class UserCompletion {
+        public int userId;
+        public long completionTimeMs;
+        public int iterationsCompleted;
+    }
+
+    public static class TimeSeriesEntry {
+        public Instant timestamp; // ISO-8601
+        public int usersActive;
+        public int usersCompleted;
+        public long totalRequestsSoFar;
         public double rpsInWindow;
-        public long latMinMs;
-        public long latAvgMs;
-        public long latMaxMs;
+        public Double expectedRpsInWindow;
+        public LatencyWindow latency;
         public long errorsInWindow;
     }
 
-    public static class RestEndpointStats {
+    public static class LatencyWindow {
+        public long min;
+        public long avg;
+        public long max;
+    }
+
+    public static class ProtocolDetails {
+        public RestDetails rest;
+        // future: grpc, fix, mq
+    }
+
+    public static class RestDetails {
+        public List<RestEndpoint> endpoints;
+    }
+
+    public static class RestEndpoint {
         public String method;
         public String path;
         public long total;
         public long success;
         public long failure;
-        public Long avgMs;
-        public Long p95Ms;
-        public Long p99Ms;
+        public Latency latency;
         public Map<String, Long> statusBreakdown; // 2xx, 4xx, 5xx or specific codes
     }
 }
-

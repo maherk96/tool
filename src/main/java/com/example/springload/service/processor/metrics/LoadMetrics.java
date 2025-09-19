@@ -296,7 +296,14 @@ public class LoadMetrics {
         long min = latencyMin.get();
         long max = latencyMax.get();
         long avg = latencyAvgMs().orElse(0L);
-        timeSeries.add(new TimeSeriesPoint(now, req, err, min == Long.MAX_VALUE ? 0 : min, max, avg));
+        timeSeries.add(new TimeSeriesPoint(now,
+                req,
+                err,
+                min == Long.MAX_VALUE ? 0 : min,
+                max,
+                avg,
+                usersStarted.get(),
+                usersCompleted.get()));
         lastSnapshotAt = now;
     }
 
@@ -330,88 +337,106 @@ public class LoadMetrics {
 
     public TaskRunReport buildFinalReport() {
         TaskRunReport r = new TaskRunReport();
-        // metadata
+        // identifiers & timing
         r.taskId = config.taskId();
         r.taskType = config.taskType();
         r.model = TaskRunReport.ModelKind.valueOf(config.model().name());
-        r.startTime = startedAt;
+        r.startTime = startedAt; // ISO-8601 via Jackson
         Instant end = Instant.now();
         r.endTime = end;
-        r.duration = Duration.between(startedAt, end);
+        r.durationSec = Math.max(0.0, Duration.between(startedAt, end).toMillis() / 1000.0);
+
+        // environment
         TaskRunReport.EnvInfo env = new TaskRunReport.EnvInfo();
         env.branch = EnvironmentInfo.branch();
         env.commit = EnvironmentInfo.commit();
         env.host = EnvironmentInfo.host();
         env.triggeredBy = EnvironmentInfo.triggeredBy();
         r.environment = env;
-        r.warmup = config.warmup();
-        r.rampUp = config.rampUp();
-        r.holdFor = config.holdFor();
-        r.usersStarted = totalUsersStarted();
-        r.usersCompleted = totalUsersCompleted();
 
-        // load config
-        r.users = config.users();
-        r.iterationsPerUser = config.iterationsPerUser();
-        r.arrivalRatePerSec = config.arrivalRatePerSec();
-        r.openDuration = config.duration();
-        r.requestsPerIteration = config.requestsPerIteration();
-        r.expectedTotalRequests = config.expectedTotalRequests();
-        r.expectedRps = config.expectedRps();
+        // config
+        TaskRunReport.Config cfg = new TaskRunReport.Config();
+        cfg.users = config.users();
+        cfg.iterationsPerUser = config.iterationsPerUser();
+        cfg.requestsPerIteration = config.requestsPerIteration();
+        cfg.warmup = config.warmup();
+        cfg.rampUp = config.rampUp();
+        cfg.holdFor = config.holdFor();
+        cfg.arrivalRatePerSec = config.arrivalRatePerSec();
+        cfg.openDuration = config.duration();
+        cfg.expectedTotalRequests = config.expectedTotalRequests();
+        Double expectedRps = config.expectedRps();
+        if (expectedRps == null && config.model() == ModelKind.CLOSED && config.holdFor() != null && !config.holdFor().isZero()) {
+            double holdSec = Math.max(0.001, config.holdFor().toMillis() / 1000.0);
+            expectedRps = cfg.expectedTotalRequests / holdSec;
+        }
+        cfg.expectedRps = expectedRps;
+        r.config = cfg;
 
-        // execution metrics
-        r.totalRequests = totalRequests();
-        r.totalFailed = totalErrors();
-        r.totalSucceeded = Math.max(0, r.totalRequests - r.totalFailed);
-        long processedForSuccessRate = r.totalRequests;
-        r.successRate = processedForSuccessRate == 0 ? 0.0 : (double) r.totalSucceeded / processedForSuccessRate;
-        r.achievedRps = achievedRps();
-        r.latencyAvgMs = latencyAvgMs().orElse(null);
-        r.latencyMinMs = latencyMinMs().orElse(null);
-        r.latencyMaxMs = latencyMaxMs().orElse(null);
-        r.latencyP95Ms = latencyP95Ms().orElse(null);
-        r.latencyP99Ms = latencyP99Ms().orElse(null);
-        r.errorBreakdown = errorBreakdown();
-
-        // user-level stats
-        int usersCount = Math.max(1, usersStarted.get());
-        int sumIters = userIterationsCompleted.values().stream().mapToInt(AtomicInteger::get).sum();
-        r.avgIterationsPerUser = usersCount == 0 ? 0.0 : (double) sumIters / usersCount;
-        java.util.List<Long> completionTimes = new java.util.ArrayList<>();
+        // metrics aggregate
+        TaskRunReport.Metrics m = new TaskRunReport.Metrics();
+        m.totalRequests = totalRequests();
+        m.failureCount = totalErrors();
+        m.successCount = Math.max(0, m.totalRequests - m.failureCount);
+        m.successRate = m.totalRequests == 0 ? 0.0 : (double) m.successCount / m.totalRequests;
+        m.achievedRps = achievedRps();
+        TaskRunReport.Latency lat = new TaskRunReport.Latency();
+        lat.avg = latencyAvgMs().orElse(null);
+        lat.min = latencyMinMs().orElse(null);
+        lat.max = latencyMaxMs().orElse(null);
+        lat.p95 = latencyP95Ms().orElse(null);
+        lat.p99 = latencyP99Ms().orElse(null);
+        m.latency = lat;
+        // error breakdown array
+        java.util.List<TaskRunReport.ErrorItem> errs = new java.util.ArrayList<>();
+        for (var e : errorBreakdown().entrySet()) {
+            TaskRunReport.ErrorItem item = new TaskRunReport.ErrorItem();
+            item.type = e.getKey();
+            item.count = e.getValue();
+            errs.add(item);
+        }
+        m.errorBreakdown = java.util.List.copyOf(errs);
+        // user histogram
+        java.util.List<TaskRunReport.UserCompletion> histogram = new java.util.ArrayList<>();
         for (Map.Entry<Integer, Instant> e : userEndTimes.entrySet()) {
             Instant start = userStartTimes.get(e.getKey());
             if (start != null) {
-                completionTimes.add(Duration.between(start, e.getValue()).toMillis());
+                TaskRunReport.UserCompletion uc = new TaskRunReport.UserCompletion();
+                uc.userId = e.getKey() + 1;
+                uc.completionTimeMs = Duration.between(start, e.getValue()).toMillis();
+                uc.iterationsCompleted = userIterationsCompleted.getOrDefault(e.getKey(), new AtomicInteger(0)).get();
+                histogram.add(uc);
             }
         }
-        r.minUserCompletionMillis = completionTimes.stream().mapToLong(Long::longValue).min().isPresent() ?
-                completionTimes.stream().mapToLong(Long::longValue).min().getAsLong() : null;
-        r.maxUserCompletionMillis = completionTimes.stream().mapToLong(Long::longValue).max().isPresent() ?
-                completionTimes.stream().mapToLong(Long::longValue).max().getAsLong() : null;
-        java.util.List<Integer> notCompleted = new java.util.ArrayList<>();
-        for (Integer idx : userStartTimes.keySet()) {
-            if (!userEndTimes.containsKey(idx)) notCompleted.add(idx + 1);
-        }
-        r.usersNotCompleted = java.util.List.copyOf(notCompleted);
+        m.userCompletionHistogram = java.util.List.copyOf(histogram);
+        m.usersStarted = totalUsersStarted();
+        m.usersCompleted = totalUsersCompleted();
+        m.expectedRps = cfg.expectedRps;
+        r.metrics = m;
 
-        // time-series windows
-        java.util.List<TaskRunReport.TimeWindow> windows = new java.util.ArrayList<>();
+        // timeseries
+        java.util.List<TaskRunReport.TimeSeriesEntry> windows = new java.util.ArrayList<>();
         long prevReq = 0;
         long prevErr = 0;
         Instant prevTs = startedAt;
         for (TimeSeriesPoint p : timeSeries) {
-            TaskRunReport.TimeWindow w = new TaskRunReport.TimeWindow();
+            TaskRunReport.TimeSeriesEntry w = new TaskRunReport.TimeSeriesEntry();
             w.timestamp = p.timestamp();
-            w.usersCompleted = usersCompleted.get();
+            w.usersCompleted = p.usersCompleted();
+            int usersActive = Math.max(0, p.usersStarted() - p.usersCompleted());
+            w.usersActive = usersActive;
             long deltaReq = p.totalRequests() - prevReq;
             long deltaErr = p.totalErrors() - prevErr;
             double secs = Math.max(0.001, Duration.between(prevTs, p.timestamp()).toMillis() / 1000.0);
             w.rpsInWindow = deltaReq / secs;
-            w.totalRequests = p.totalRequests();
+            w.expectedRpsInWindow = cfg.expectedRps; // constant target for now
+            w.totalRequestsSoFar = p.totalRequests();
             w.errorsInWindow = deltaErr;
-            w.latMinMs = p.latMinMs();
-            w.latAvgMs = p.latAvgMs();
-            w.latMaxMs = p.latMaxMs();
+            TaskRunReport.LatencyWindow lw = new TaskRunReport.LatencyWindow();
+            lw.min = p.latMinMs();
+            lw.avg = p.latAvgMs();
+            lw.max = p.latMaxMs();
+            w.latency = lw;
             windows.add(w);
             prevReq = p.totalRequests();
             prevErr = p.totalErrors();
@@ -419,23 +444,31 @@ public class LoadMetrics {
         }
         r.timeseries = java.util.List.copyOf(windows);
 
-        // REST endpoint stats placeholder (populated by REST processor via endpoint methods)
+        // protocol-specific: REST endpoints
         if (!endpointStats.isEmpty()) {
-            java.util.List<TaskRunReport.RestEndpointStats> list = new java.util.ArrayList<>();
+            TaskRunReport.ProtocolDetails pd = new TaskRunReport.ProtocolDetails();
+            TaskRunReport.RestDetails rd = new TaskRunReport.RestDetails();
+            java.util.List<TaskRunReport.RestEndpoint> list = new java.util.ArrayList<>();
             for (EndpointStats s : endpointStats.values()) {
-                TaskRunReport.RestEndpointStats es = new TaskRunReport.RestEndpointStats();
+                TaskRunReport.RestEndpoint es = new TaskRunReport.RestEndpoint();
                 es.method = s.method;
                 es.path = s.path;
                 es.total = s.total.get();
                 es.success = s.success.get();
                 es.failure = s.failure.get();
-                es.avgMs = s.avgMs();
-                es.p95Ms = s.p95Ms();
-                es.p99Ms = s.p99Ms();
+                TaskRunReport.Latency els = new TaskRunReport.Latency();
+                els.avg = s.avgMs();
+                els.min = s.minLatency.get() == Long.MAX_VALUE ? null : s.minLatency.get();
+                els.max = s.maxLatency.get();
+                els.p95 = s.p95Ms();
+                els.p99 = s.p99Ms();
+                es.latency = els;
                 es.statusBreakdown = s.statusBreakdownSnapshot();
                 list.add(es);
             }
-            r.restEndpoints = java.util.List.copyOf(list);
+            rd.endpoints = java.util.List.copyOf(list);
+            pd.rest = rd;
+            r.protocolDetails = pd;
         }
         return r;
     }
@@ -511,7 +544,14 @@ public class LoadMetrics {
 
     public java.util.List<TimeSeriesPoint> getTimeSeries() { return java.util.List.copyOf(timeSeries); }
 
-    public record TimeSeriesPoint(Instant timestamp, long totalRequests, long totalErrors, long latMinMs, long latMaxMs, long latAvgMs) {}
+    public record TimeSeriesPoint(Instant timestamp,
+                                  long totalRequests,
+                                  long totalErrors,
+                                  long latMinMs,
+                                  long latMaxMs,
+                                  long latAvgMs,
+                                  int usersStarted,
+                                  int usersCompleted) {}
 
     // Simple thread-safe reservoir sampling for percentiles
     private static final class Reservoir {
