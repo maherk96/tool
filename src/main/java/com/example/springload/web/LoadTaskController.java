@@ -4,7 +4,9 @@ import com.example.springload.dto.HealthResponse;
 import com.example.springload.dto.QueueStatusResponse;
 import com.example.springload.dto.TaskCancellationResponse;
 import com.example.springload.dto.TaskHistoryEntry;
+import com.example.springload.dto.TaskLiveMetricsResponse;
 import com.example.springload.dto.TaskMetricsResponse;
+import com.example.springload.dto.TaskRunReport;
 import com.example.springload.dto.TaskStatusResponse;
 import com.example.springload.dto.TaskSubmissionRequest;
 import com.example.springload.dto.TaskSubmissionResponse;
@@ -37,6 +39,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import com.example.springload.service.processor.metrics.LoadMetrics;
 
 @RestController
 @RequestMapping("/api/tasks")
@@ -46,9 +49,12 @@ public class LoadTaskController {
     private static final Logger log = LoggerFactory.getLogger(LoadTaskController.class);
 
     private final LoadTaskService loadTaskService;
+    private final com.example.springload.service.processor.metrics.LoadMetricsRegistry metricsRegistry;
 
-    public LoadTaskController(LoadTaskService loadTaskService) {
+    public LoadTaskController(LoadTaskService loadTaskService,
+                              com.example.springload.service.processor.metrics.LoadMetricsRegistry metricsRegistry) {
         this.loadTaskService = loadTaskService;
+        this.metricsRegistry = metricsRegistry;
     }
 
     @PostMapping
@@ -130,6 +136,22 @@ public class LoadTaskController {
         return ResponseEntity.ok(loadTaskService.getMetrics());
     }
 
+    @GetMapping("/{taskId}/metrics")
+    public ResponseEntity<?> getTaskMetrics(@PathVariable("taskId") UUID taskId) {
+        return metricsRegistry.getSnapshot(taskId)
+                .<ResponseEntity<?>>map(snapshot -> ResponseEntity.ok(mapToResponse(snapshot)))
+                .orElseGet(() -> ResponseEntity.status(HttpStatus.NOT_FOUND)
+                        .body(Map.of("error", "Metrics not found for task: " + taskId)));
+    }
+
+    @GetMapping("/{taskId}/report")
+    public ResponseEntity<?> getTaskReport(@PathVariable("taskId") UUID taskId) {
+        return metricsRegistry.getReport(taskId)
+                .<ResponseEntity<?>>map(ResponseEntity::ok)
+                .orElseGet(() -> ResponseEntity.status(HttpStatus.NOT_FOUND)
+                        .body(Map.of("error", "Report not found for task: " + taskId)));
+    }
+
     @GetMapping("/types")
     public ResponseEntity<Set<String>> getSupportedTaskTypes() {
         return ResponseEntity.ok(loadTaskService.getSupportedTaskTypes());
@@ -169,5 +191,35 @@ public class LoadTaskController {
             case ERROR -> HttpStatus.BAD_REQUEST;
             case CANCELLED -> HttpStatus.SERVICE_UNAVAILABLE;
         };
+    }
+
+    private TaskLiveMetricsResponse mapToResponse(LoadMetrics.LoadSnapshot snapshot) {
+        TaskLiveMetricsResponse resp = new TaskLiveMetricsResponse();
+        LoadMetrics.TaskConfig cfg = snapshot.config();
+        resp.setTaskId(cfg.taskId());
+        resp.setTaskType(cfg.taskType());
+        resp.setBaseUrl(cfg.baseUrl());
+        resp.setModel(TaskLiveMetricsResponse.ModelKind.valueOf(cfg.model().name()));
+        resp.setUsers(cfg.users());
+        resp.setIterationsPerUser(cfg.iterationsPerUser());
+        resp.setWarmup(cfg.warmup());
+        resp.setRampUp(cfg.rampUp());
+        resp.setHoldFor(cfg.holdFor());
+        resp.setArrivalRatePerSec(cfg.arrivalRatePerSec());
+        resp.setDuration(cfg.duration());
+        resp.setRequestsPerIteration(cfg.requestsPerIteration());
+        resp.setExpectedTotalRequests(cfg.expectedTotalRequests());
+        resp.setExpectedRps(cfg.expectedRps());
+
+        resp.setUsersStarted(snapshot.usersStarted());
+        resp.setUsersCompleted(snapshot.usersCompleted());
+        resp.setTotalRequests(snapshot.totalRequests());
+        resp.setTotalErrors(snapshot.totalErrors());
+        resp.setAchievedRps(snapshot.achievedRps());
+        resp.setLatencyMinMs(snapshot.latencyMinMs());
+        resp.setLatencyAvgMs(snapshot.latencyAvgMs());
+        resp.setLatencyMaxMs(snapshot.latencyMaxMs());
+        resp.setActiveUserIterations(snapshot.activeUserIterations());
+        return resp;
     }
 }

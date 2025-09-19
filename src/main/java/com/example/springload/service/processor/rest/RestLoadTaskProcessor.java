@@ -9,6 +9,7 @@ import com.example.springload.model.TaskType;
 import com.example.springload.service.processor.LoadTaskProcessor;
 import com.example.springload.service.processor.executor.ClosedLoadExecutor;
 import com.example.springload.service.processor.executor.OpenLoadExecutor;
+import com.example.springload.dto.TaskRunReport;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.example.springload.service.processor.metrics.LoadMetrics;
@@ -38,6 +39,11 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
     private static final long SLEEP_CHUNK_MILLIS = 200L;
 
     private final Map<UUID, AtomicBoolean> cancellationTokens = new ConcurrentHashMap<>();
+    private final com.example.springload.service.processor.metrics.LoadMetricsRegistry metricsRegistry;
+
+    public RestLoadTaskProcessor(com.example.springload.service.processor.metrics.LoadMetricsRegistry metricsRegistry) {
+        this.metricsRegistry = metricsRegistry;
+    }
 
     @Override
     public TaskType supportedTaskType() {
@@ -123,6 +129,7 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
                 expectedRps
         ), log);
         metrics.start();
+        metricsRegistry.register(taskId, metrics);
 
         OpenLoadExecutor.OpenLoadParameters parameters =
                 new OpenLoadExecutor.OpenLoadParameters(rate, maxConcurrent, duration);
@@ -141,6 +148,14 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
                 log);
 
         metrics.stopAndSummarize();
+        metricsRegistry.complete(taskId, metrics.snapshotNow());
+        TaskRunReport report = metrics.buildFinalReport();
+        metricsRegistry.saveReport(taskId, report);
+        try {
+            log.info("Task {} run report:\n{}", taskId, JsonUtil.toJson(report));
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            log.info("Task {} run report (unformatted): {}", taskId, report);
+        }
 
         log.info("Open load completed: launched={} completed={} cancelled={} rate={} maxConcurrent={} duration={}",
                 result.launched(),
@@ -184,6 +199,7 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
                 null
         ), log);
         metrics.start();
+        metricsRegistry.register(taskId, metrics);
 
         ClosedLoadExecutor.ClosedLoadParameters parameters =
                 new ClosedLoadExecutor.ClosedLoadParameters(users, iterations, warmup, rampUp, holdFor);
@@ -205,6 +221,14 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
                 log);
 
         metrics.stopAndSummarize();
+        metricsRegistry.complete(taskId, metrics.snapshotNow());
+        TaskRunReport report = metrics.buildFinalReport();
+        metricsRegistry.saveReport(taskId, report);
+        try {
+            log.info("Task {} run report:\n{}", taskId, JsonUtil.toJson(report));
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            log.info("Task {} run report (unformatted): {}", taskId, report);
+        }
 
         log.info("Task {} closed load finished: usersCompleted={}/{} cancelled={} holdExpired={}",
                 taskId,
@@ -233,9 +257,15 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
                 Request request = toHttpRequest(requestSpec);
                 try {
                     var response = client.execute(request);
-                    metrics.recordRequestSuccess(response.getResponseTimeMs(), response.getStatusCode());
+                    if (response.getStatusCode() >= 400) {
+                        metrics.recordHttpFailure(response.getStatusCode(), response.getResponseTimeMs(), request.getMethod().name(), request.getPath());
+                    } else {
+                        metrics.recordRequestSuccess(response.getResponseTimeMs(), response.getStatusCode());
+                        metrics.recordEndpointSuccess(request.getMethod().name(), request.getPath(), response.getResponseTimeMs(), response.getStatusCode());
+                    }
                 } catch (RuntimeException ex) {
                     metrics.recordRequestFailure(ex);
+                    metrics.recordEndpointFailure(request.getMethod().name(), request.getPath(), "EXCEPTION");
                     throw ex;
                 }
                 if (thinkTime.isEnabled()) {
