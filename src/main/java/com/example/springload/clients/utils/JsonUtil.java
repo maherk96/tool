@@ -25,6 +25,9 @@ public class JsonUtil {
             .enable(JsonReadFeature.ALLOW_UNQUOTED_FIELD_NAMES.mappedFeature())
             .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
             .enable(SerializationFeature.INDENT_OUTPUT)
+            // Ensure Java Time types (Instant, LocalDateTime, Duration) serialize as ISO-8601 strings
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+            .disable(SerializationFeature.WRITE_DURATIONS_AS_TIMESTAMPS)
             .build();
 
     MAPPER.registerModule(new JavaTimeModule());
