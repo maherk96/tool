@@ -9,16 +9,14 @@ import java.util.Map;
 
 public class TaskSubmissionRequest {
 
-    @NotBlank
-    @JsonProperty("taskId")
+    @JsonProperty(value = "taskId", access = JsonProperty.Access.READ_ONLY)
     private String taskId;
 
     @NotBlank
     @JsonProperty("taskType")
     private String taskType;
 
-    @NotNull
-    @JsonProperty("createdAt")
+    @JsonProperty(value = "createdAt", access = JsonProperty.Access.READ_ONLY)
     private Instant createdAt;
 
     @NotNull

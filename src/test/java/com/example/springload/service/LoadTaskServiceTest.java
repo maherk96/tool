@@ -6,15 +6,19 @@ import com.example.springload.dto.TaskHistoryEntry;
 import com.example.springload.dto.TaskMetricsResponse;
 import com.example.springload.dto.TaskStatusResponse;
 import com.example.springload.dto.TaskSummaryResponse;
+import com.example.springload.dto.TaskSubmissionRequest;
 import com.example.springload.model.LoadTask;
 import com.example.springload.model.TaskStatus;
 import com.example.springload.model.TaskType;
+import com.example.springload.service.processor.LoadTaskProcessor;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -234,11 +238,51 @@ class LoadTaskServiceTest {
         properties.setConcurrency(concurrency);
         properties.setHistorySize(historySize);
         properties.setSimulatedDurationMs(simulatedDurationMs);
-        return new LoadTaskService(properties);
+        LoadTaskProcessor processor = new StubProcessor(simulatedDurationMs);
+        return new LoadTaskService(properties, List.of(processor));
     }
 
     private static LoadTask newTask() {
-        return new LoadTask(UUID.randomUUID(), TaskType.REST, Instant.now(), Map.of("payload", "value"));
+        return new LoadTask(UUID.randomUUID(), TaskType.REST_LOAD, Instant.now(), Map.of("payload", "value"));
+    }
+
+    private static class StubProcessor implements LoadTaskProcessor {
+        private final long executionDelayMs;
+        private final Map<UUID, AtomicBoolean> cancellations = new ConcurrentHashMap<>();
+
+        private StubProcessor(long executionDelayMs) {
+            this.executionDelayMs = executionDelayMs;
+        }
+
+        @Override
+        public TaskType supportedTaskType() {
+            return TaskType.REST_LOAD;
+        }
+
+        @Override
+        public void execute(TaskSubmissionRequest request) throws Exception {
+            UUID taskId = UUID.fromString(request.getTaskId());
+            AtomicBoolean flag = cancellations.computeIfAbsent(taskId, id -> new AtomicBoolean(false));
+            flag.set(false);
+            long waited = 0L;
+            try {
+                while (waited < executionDelayMs) {
+                    if (flag.get() || Thread.currentThread().isInterrupted()) {
+                        throw new InterruptedException("Task cancelled");
+                    }
+                    long chunk = Math.min(25L, executionDelayMs - waited);
+                    Thread.sleep(chunk);
+                    waited += chunk;
+                }
+            } finally {
+                cancellations.remove(taskId);
+            }
+        }
+
+        @Override
+        public void cancel(UUID taskId) {
+            cancellations.computeIfAbsent(taskId, id -> new AtomicBoolean(false)).set(true);
+        }
     }
 
     private static TaskStatusResponse awaitStatus(LoadTaskService service, UUID taskId, TaskStatus expectedStatus, Duration timeout) {

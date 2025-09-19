@@ -6,10 +6,12 @@ import com.example.springload.dto.TaskHistoryEntry;
 import com.example.springload.dto.TaskMetricsResponse;
 import com.example.springload.dto.TaskStatusResponse;
 import com.example.springload.dto.TaskSummaryResponse;
+import com.example.springload.dto.TaskSubmissionRequest;
 import com.example.springload.model.LoadTask;
 import com.example.springload.model.TaskRecord;
 import com.example.springload.model.TaskStatus;
 import com.example.springload.model.TaskType;
+import com.example.springload.service.processor.LoadTaskProcessor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -21,8 +23,10 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Deque;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -36,6 +40,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 
 import static java.util.concurrent.Executors.newFixedThreadPool;
 
@@ -48,6 +53,7 @@ public class LoadTaskService {
     private final ThreadPoolExecutor executor;
     private final Map<UUID, TaskRecord> taskRecords;
     private final Map<UUID, Future<?>> activeTasks;
+    private final Map<TaskType, LoadTaskProcessor> processors;
     private final Deque<TaskRecord> taskHistory;
     private final AtomicBoolean acceptingTasks;
     private final AtomicInteger activeTaskCount;
@@ -56,7 +62,7 @@ public class LoadTaskService {
     private final AtomicLong totalCancelled;
     private final AtomicLong cumulativeProcessingTime;
 
-    public LoadTaskService(TaskProcessingProperties properties) {
+    public LoadTaskService(TaskProcessingProperties properties, List<LoadTaskProcessor> processors) {
         this.properties = properties;
         this.executor = createExecutor(properties.getConcurrency());
         this.taskRecords = new ConcurrentHashMap<>();
@@ -68,6 +74,7 @@ public class LoadTaskService {
         this.totalFailed = new AtomicLong();
         this.totalCancelled = new AtomicLong();
         this.cumulativeProcessingTime = new AtomicLong();
+        this.processors = initializeProcessors(processors);
     }
 
     @PostConstruct
@@ -90,9 +97,28 @@ public class LoadTaskService {
         return pool;
     }
 
+    private Map<TaskType, LoadTaskProcessor> initializeProcessors(List<LoadTaskProcessor> availableProcessors) {
+        Map<TaskType, LoadTaskProcessor> map = new EnumMap<>(TaskType.class);
+        for (LoadTaskProcessor processor : availableProcessors) {
+            Objects.requireNonNull(processor, "Processor entry cannot be null");
+            TaskType taskType = Objects.requireNonNull(processor.supportedTaskType(), "Processor must declare supported task type");
+            LoadTaskProcessor existing = map.putIfAbsent(taskType, processor);
+            if (existing != null) {
+                throw new IllegalStateException("Multiple processors registered for task type " + taskType);
+            }
+        }
+        return Map.copyOf(map);
+    }
+
     public Optional<TaskSubmissionOutcome> submitTask(LoadTask task) {
         if (!acceptingTasks.get()) {
             return Optional.empty();
+        }
+
+        LoadTaskProcessor processor = processors.get(task.getTaskType());
+        if (processor == null) {
+            return Optional.of(new TaskSubmissionOutcome(task.getId(), TaskStatus.ERROR,
+                    "No processor available for task type " + task.getTaskType().name()));
         }
 
         TaskRecord record = new TaskRecord(task, Instant.now());
@@ -139,7 +165,14 @@ public class LoadTaskService {
             activeTaskCount.incrementAndGet();
             log.info("Task {} started", taskId);
 
-            simulateExecution(record.getTask());
+            LoadTask task = record.getTask();
+            LoadTaskProcessor processor = processors.get(task.getTaskType());
+            if (processor == null) {
+                throw new IllegalStateException("No processor registered for task type " + task.getTaskType());
+            }
+
+            TaskSubmissionRequest submissionRequest = toSubmissionRequest(task);
+            processor.execute(submissionRequest);
 
             record.markCompleted(Instant.now());
             totalCompleted.incrementAndGet();
@@ -163,17 +196,20 @@ public class LoadTaskService {
         }
     }
 
-    private void simulateExecution(LoadTask task) throws InterruptedException {
-        // Simulate execution with a bounded sleep
-        long sleepMillis = Math.max(0, properties.getSimulatedDurationMs());
-        TimeUnit.MILLISECONDS.sleep(sleepMillis);
-    }
-
     private void addToHistory(TaskRecord record) {
         taskHistory.addFirst(record);
         while (taskHistory.size() > properties.getHistorySize()) {
             taskHistory.pollLast();
         }
+    }
+
+    private TaskSubmissionRequest toSubmissionRequest(LoadTask task) {
+        TaskSubmissionRequest request = new TaskSubmissionRequest();
+        request.setTaskId(task.getId().toString());
+        request.setTaskType(task.getTaskType().name());
+        request.setCreatedAt(task.getCreatedAt());
+        request.setData(task.getData());
+        return request;
     }
 
     public Optional<TaskStatusResponse> getTaskStatus(UUID taskId) {
@@ -241,6 +277,8 @@ public class LoadTaskService {
             return CancellationResult.notFound();
         }
         TaskStatus status = record.getStatus();
+        LoadTask task = record.getTask();
+        LoadTaskProcessor processor = processors.get(task.getTaskType());
         if (status == TaskStatus.COMPLETED || status == TaskStatus.ERROR || status == TaskStatus.CANCELLED) {
             return CancellationResult.notCancellable(status);
         }
@@ -249,6 +287,9 @@ public class LoadTaskService {
         if (future != null) {
             boolean cancelled = future.cancel(true);
             if (cancelled && status == TaskStatus.QUEUED) {
+                if (processor != null) {
+                    processor.cancel(taskId);
+                }
                 record.markCancelled(Instant.now());
                 totalCancelled.incrementAndGet();
                 addToHistory(record);
@@ -256,6 +297,9 @@ public class LoadTaskService {
                 log.info("Task {} cancelled while queued", taskId);
                 return CancellationResult.cancelled(record.getStatus());
             } else if (cancelled) {
+                if (processor != null) {
+                    processor.cancel(taskId);
+                }
                 log.info("Task {} cancellation requested", taskId);
                 return CancellationResult.cancellationRequested(record.getStatus());
             }
@@ -263,6 +307,9 @@ public class LoadTaskService {
         }
 
         if (status == TaskStatus.QUEUED) {
+            if (processor != null) {
+                processor.cancel(taskId);
+            }
             record.markCancelled(Instant.now());
             totalCancelled.incrementAndGet();
             addToHistory(record);
@@ -274,7 +321,9 @@ public class LoadTaskService {
     }
 
     public Set<String> getSupportedTaskTypes() {
-        return TaskType.asStrings();
+        return processors.keySet().stream()
+                .map(TaskType::name)
+                .collect(Collectors.toUnmodifiableSet());
     }
 
     public void shutdown() {

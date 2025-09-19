@@ -142,14 +142,6 @@ public class LoadTaskController {
     }
 
     private LoadTask mapToDomain(TaskSubmissionRequest request) {
-        UUID taskId;
-        try {
-            taskId = UUID.fromString(request.getTaskId());
-        } catch (IllegalArgumentException ex) {
-            log.warn("Invalid taskId {}", request.getTaskId());
-            throw new IllegalArgumentException("taskId must be a valid UUID");
-        }
-
         TaskType taskType;
         try {
             taskType = TaskType.fromValue(request.getTaskType());
@@ -163,11 +155,10 @@ public class LoadTaskController {
             throw new IllegalArgumentException("data payload must be provided");
         }
 
-        Instant createdAt = request.getCreatedAt();
-        if (createdAt == null) {
-            throw new IllegalArgumentException("createdAt timestamp is required");
-        }
-
+        UUID taskId = UUID.randomUUID();
+        Instant createdAt = Instant.now();
+        request.setTaskId(taskId.toString());
+        request.setCreatedAt(createdAt);
         return new LoadTask(taskId, taskType, createdAt, data);
     }
 

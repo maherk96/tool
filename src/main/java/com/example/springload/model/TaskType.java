@@ -5,8 +5,10 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 public enum TaskType {
-    REST,
-    FIX,
+    REST_LOAD,
+    FIX_LOAD,
+    GRPC_LOAD,
+    WEBSOCKET_LOAD,
     CUSTOM;
 
     public static TaskType fromValue(String value) {
