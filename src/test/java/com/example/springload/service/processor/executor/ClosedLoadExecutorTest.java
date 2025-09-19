@@ -9,29 +9,47 @@ import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ClosedLoadExecutorTest {
 
     private static final Logger log = LoggerFactory.getLogger(ClosedLoadExecutorTest.class);
 
     @Test
-    void completesAllUsersWhenNoInterruptions() throws Exception {
-        ClosedLoadExecutor.ClosedLoadParameters parameters =
-                new ClosedLoadExecutor.ClosedLoadParameters(3, 2, Duration.ZERO, Duration.ofMillis(20), Duration.ofSeconds(2));
+    void closedLoadLowIntensityReachesExpectedIterations() throws Exception {
+        int users = 2;
+        int iterations = 50;
+        ExecutionStats stats = runClosedLoad(users, iterations, Duration.ZERO, Duration.ZERO, Duration.ofSeconds(15), 100);
 
-        AtomicInteger iterationCounter = new AtomicInteger();
-        ClosedLoadExecutor.ClosedLoadResult result = ClosedLoadExecutor.execute(
-                UUID.randomUUID(),
-                parameters,
-                () -> false,
-                (user, iteration) -> iterationCounter.incrementAndGet(),
-                log);
+        assertThat(stats.totalIterations()).isEqualTo(users * iterations);
+        assertThat(stats.result().completedUsers()).isEqualTo(users);
+        assertThat(stats.result().cancelled()).isFalse();
+        assertThat(stats.result().holdExpired()).isFalse();
+    }
 
-        assertEquals(6, iterationCounter.get());
-        assertEquals(3, result.completedUsers());
-        assertFalse(result.cancelled());
-        assertFalse(result.holdExpired());
+    @Test
+    void closedLoadMediumIntensityReachesExpectedIterations() throws Exception {
+        int users = 3;
+        int iterations = 150;
+        ExecutionStats stats = runClosedLoad(users, iterations, Duration.ZERO, Duration.ZERO, Duration.ofSeconds(45), 100);
+
+        assertThat(stats.totalIterations()).isEqualTo(users * iterations);
+        assertThat(stats.result().completedUsers()).isEqualTo(users);
+        assertThat(stats.result().cancelled()).isFalse();
+        assertThat(stats.result().holdExpired()).isFalse();
+    }
+
+    @Test
+    void closedLoadHighIntensitySustainsTwoMinuteRun() throws Exception {
+        int users = 2;
+        int iterations = 1200;
+        ExecutionStats stats = runClosedLoad(users, iterations, Duration.ofSeconds(5), Duration.ofSeconds(10), Duration.ofSeconds(150), 100);
+
+        assertThat(stats.totalIterations()).isEqualTo(users * iterations);
+        assertThat(stats.result().completedUsers()).isEqualTo(users);
+        assertThat(stats.result().cancelled()).isFalse();
+        assertThat(stats.result().holdExpired()).isFalse();
     }
 
     @Test
@@ -83,4 +101,31 @@ class ClosedLoadExecutorTest {
         assertTrue(result.cancelled());
         assertTrue(result.completedUsers() < result.totalUsers());
     }
+
+    private ExecutionStats runClosedLoad(int users,
+                                         int iterations,
+                                         Duration warmup,
+                                         Duration rampUp,
+                                         Duration holdFor,
+                                         long perIterationDelayMs) throws Exception {
+        AtomicInteger iterationCounter = new AtomicInteger();
+        ClosedLoadExecutor.ClosedLoadParameters parameters =
+                new ClosedLoadExecutor.ClosedLoadParameters(users, iterations, warmup, rampUp, holdFor);
+
+        ClosedLoadExecutor.ClosedLoadResult result = ClosedLoadExecutor.execute(
+                UUID.randomUUID(),
+                parameters,
+                () -> false,
+                (user, iteration) -> {
+                    iterationCounter.incrementAndGet();
+                    if (perIterationDelayMs > 0) {
+                        TimeUnit.MILLISECONDS.sleep(perIterationDelayMs);
+                    }
+                },
+                log);
+
+        return new ExecutionStats(result, iterationCounter.get());
+    }
+
+    private record ExecutionStats(ClosedLoadExecutor.ClosedLoadResult result, int totalIterations) {}
 }

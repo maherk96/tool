@@ -8,6 +8,7 @@ import com.example.springload.dto.TaskSubmissionRequest;
 import com.example.springload.model.TaskType;
 import com.example.springload.service.processor.LoadTaskProcessor;
 import com.example.springload.service.processor.executor.ClosedLoadExecutor;
+import com.example.springload.service.processor.executor.OpenLoadExecutor;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import java.time.Duration;
@@ -16,9 +17,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -61,7 +59,7 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
 
         try (LoadHttpClient client = buildClient(testSpec)) {
             switch (loadModel.getType()) {
-                case OPEN -> executeOpenModel(client, testSpec, thinkTime, loadModel, cancelled);
+                case OPEN -> executeOpenModel(taskId, client, testSpec, thinkTime, loadModel, cancelled);
                 case CLOSED -> executeClosedModel(taskId, client, testSpec, thinkTime, loadModel, cancelled);
                 default -> throw new IllegalArgumentException("Unsupported load model type: " + loadModel.getType());
             }
@@ -88,7 +86,8 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
         return new LoadHttpClient(globalConfig.getBaseUrl(), connTimeoutSeconds, requestTimeoutSeconds, headers, vars);
     }
 
-    private void executeOpenModel(LoadHttpClient client,
+    private void executeOpenModel(UUID taskId,
+                                  LoadHttpClient client,
                                   RestTestSpec testSpec,
                                   ThinkTimeStrategy thinkTime,
                                   LoadModelConfig loadModel,
@@ -100,38 +99,29 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
         }
         Duration duration = loadModel.getDuration() != null ? parseDuration(loadModel.getDuration()) : DEFAULT_OPEN_DURATION;
 
-        ExecutorService executor = Executors.newFixedThreadPool(maxConcurrent);
-        Semaphore semaphore = new Semaphore(maxConcurrent);
-        long startNanos = System.nanoTime();
-        long durationNanos = duration.toNanos();
-        long intervalNanos = (long) Math.max(1, 1_000_000_000 / rate);
+        OpenLoadExecutor.OpenLoadParameters parameters =
+                new OpenLoadExecutor.OpenLoadParameters(rate, maxConcurrent, duration);
 
-        try {
-            while (!cancelled.get()) {
-                long elapsed = System.nanoTime() - startNanos;
-                if (elapsed >= durationNanos || Thread.currentThread().isInterrupted()) {
-                    break;
-                }
-                if (!semaphore.tryAcquire(100, TimeUnit.MILLISECONDS)) {
-                    continue;
-                }
-                executor.submit(() -> {
+        OpenLoadExecutor.OpenLoadResult result = OpenLoadExecutor.execute(
+                taskId,
+                parameters,
+                cancelled::get,
+                () -> {
                     try {
                         executeAllScenarios(client, testSpec.getScenarios(), thinkTime, cancelled);
-                    } catch (InterruptedException ex) {
+                    } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
-                    } finally {
-                        semaphore.release();
                     }
-                });
-                sleepInterval(intervalNanos, cancelled);
-            }
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-        } finally {
-            executor.shutdownNow();
-            executor.awaitTermination(30, TimeUnit.SECONDS);
-        }
+                },
+                log);
+
+        log.info("Open load completed: launched={} completed={} cancelled={} rate={} maxConcurrent={} duration={}",
+                result.launched(),
+                result.completed(),
+                result.cancelled(),
+                rate,
+                maxConcurrent,
+                duration);
     }
 
     private void executeClosedModel(UUID taskId,
