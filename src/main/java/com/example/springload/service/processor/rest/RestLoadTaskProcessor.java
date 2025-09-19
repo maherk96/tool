@@ -11,6 +11,8 @@ import com.example.springload.service.processor.executor.ClosedLoadExecutor;
 import com.example.springload.service.processor.executor.OpenLoadExecutor;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.example.springload.service.processor.metrics.LoadMetrics;
+import com.example.springload.service.processor.metrics.LoadMetrics.ModelKind;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -98,6 +100,29 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
             throw new IllegalArgumentException("OPEN load model requires arrivalRatePerSec > 0");
         }
         Duration duration = loadModel.getDuration() != null ? parseDuration(loadModel.getDuration()) : DEFAULT_OPEN_DURATION;
+        int requestsPerIteration = countRequestsPerIteration(testSpec.getScenarios());
+
+        long expectedIterations = Math.max(0, (long) Math.floor(duration.toMillis() / 1000.0 * rate));
+        long expectedTotalRequests = expectedIterations * requestsPerIteration;
+        Double expectedRps = rate * requestsPerIteration;
+
+        LoadMetrics metrics = new LoadMetrics(new LoadMetrics.TaskConfig(
+                taskId.toString(),
+                supportedTaskType().name(),
+                testSpec.getGlobalConfig() != null ? testSpec.getGlobalConfig().getBaseUrl() : "",
+                ModelKind.OPEN,
+                null,
+                null,
+                null,
+                null,
+                null,
+                rate,
+                duration,
+                requestsPerIteration,
+                expectedTotalRequests,
+                expectedRps
+        ), log);
+        metrics.start();
 
         OpenLoadExecutor.OpenLoadParameters parameters =
                 new OpenLoadExecutor.OpenLoadParameters(rate, maxConcurrent, duration);
@@ -108,12 +133,14 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
                 cancelled::get,
                 () -> {
                     try {
-                        executeAllScenarios(client, testSpec.getScenarios(), thinkTime, cancelled);
+                        executeAllScenarios(client, testSpec.getScenarios(), thinkTime, cancelled, metrics);
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
                     }
                 },
                 log);
+
+        metrics.stopAndSummarize();
 
         log.info("Open load completed: launched={} completed={} cancelled={} rate={} maxConcurrent={} duration={}",
                 result.launched(),
@@ -135,6 +162,28 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
         Duration rampUp = loadModel.getRampUp() != null ? parseDuration(loadModel.getRampUp()) : Duration.ZERO;
         Duration warmup = loadModel.getWarmup() != null ? parseDuration(loadModel.getWarmup()) : Duration.ZERO;
         Duration holdFor = loadModel.getHoldFor() != null ? parseDuration(loadModel.getHoldFor()) : Duration.ZERO;
+        int requestsPerIteration = countRequestsPerIteration(testSpec.getScenarios());
+
+        long expectedTotalRequests = (long) users * iterations * requestsPerIteration;
+
+        // We do not compute a strict expected RPS for CLOSED model (depends on SUT latency and think times).
+        LoadMetrics metrics = new LoadMetrics(new LoadMetrics.TaskConfig(
+                taskId.toString(),
+                supportedTaskType().name(),
+                testSpec.getGlobalConfig() != null ? testSpec.getGlobalConfig().getBaseUrl() : "",
+                ModelKind.CLOSED,
+                users,
+                iterations,
+                warmup,
+                rampUp,
+                holdFor,
+                null,
+                null,
+                requestsPerIteration,
+                expectedTotalRequests,
+                null
+        ), log);
+        metrics.start();
 
         ClosedLoadExecutor.ClosedLoadParameters parameters =
                 new ClosedLoadExecutor.ClosedLoadParameters(users, iterations, warmup, rampUp, holdFor);
@@ -143,8 +192,19 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
                 taskId,
                 parameters,
                 cancelled::get,
-                (userIndex, iteration) -> executeAllScenarios(client, testSpec.getScenarios(), thinkTime, cancelled),
+                (userIndex, iteration) -> {
+                    if (iteration == 0) {
+                        metrics.recordUserStarted(userIndex);
+                    }
+                    metrics.recordUserProgress(userIndex, iteration);
+                    executeAllScenarios(client, testSpec.getScenarios(), thinkTime, cancelled, metrics);
+                    if (iteration == (iterations - 1)) {
+                        metrics.recordUserCompleted(userIndex, iterations);
+                    }
+                },
                 log);
+
+        metrics.stopAndSummarize();
 
         log.info("Task {} closed load finished: usersCompleted={}/{} cancelled={} holdExpired={}",
                 taskId,
@@ -157,7 +217,8 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
     private void executeAllScenarios(LoadHttpClient client,
                                      List<Scenario> scenarios,
                                      ThinkTimeStrategy thinkTime,
-                                     AtomicBoolean cancelled) throws InterruptedException {
+                                     AtomicBoolean cancelled,
+                                     LoadMetrics metrics) throws InterruptedException {
         if (scenarios == null || scenarios.isEmpty()) {
             throw new IllegalArgumentException("testSpec.scenarios must contain at least one scenario");
         }
@@ -170,12 +231,29 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
             for (RequestSpec requestSpec : scenario.getRequests()) {
                 checkCancelled(cancelled);
                 Request request = toHttpRequest(requestSpec);
-                client.execute(request);
+                try {
+                    var response = client.execute(request);
+                    metrics.recordRequestSuccess(response.getResponseTimeMs(), response.getStatusCode());
+                } catch (RuntimeException ex) {
+                    metrics.recordRequestFailure(ex);
+                    throw ex;
+                }
                 if (thinkTime.isEnabled()) {
                     thinkTime.pause(cancelled);
                 }
             }
         }
+    }
+
+    private int countRequestsPerIteration(List<Scenario> scenarios) {
+        if (scenarios == null) return 0;
+        int total = 0;
+        for (Scenario s : scenarios) {
+            if (s.getRequests() != null) {
+                total += s.getRequests().size();
+            }
+        }
+        return total;
     }
 
     private Request toHttpRequest(RequestSpec requestSpec) {

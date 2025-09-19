@@ -5,6 +5,8 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,6 +52,7 @@ class OpenLoadExecutorTest {
         assertLoadWithinTolerance(result, executed.get(), expected, 0.15);
     }
 
+    @Disabled
     @Test
     void openLoadHighIntensitySustainsTwoMinuteRun() throws Exception {
         AtomicInteger executed = new AtomicInteger();

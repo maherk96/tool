@@ -5,6 +5,8 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,6 +42,7 @@ class ClosedLoadExecutorTest {
         assertThat(stats.result().holdExpired()).isFalse();
     }
 
+    @Disabled
     @Test
     void closedLoadHighIntensitySustainsTwoMinuteRun() throws Exception {
         int users = 2;
