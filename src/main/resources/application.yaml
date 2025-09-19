@@ -1,0 +1,9 @@
+spring:
+  application:
+    name: spring-load
+
+load:
+  tasks:
+    concurrency: 1
+    history-size: 50
+    simulated-duration-ms: 1000
