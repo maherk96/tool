@@ -45,6 +45,11 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
         this.metricsRegistry = metricsRegistry;
     }
 
+    // For tests that directly construct the processor without Spring context
+    public RestLoadTaskProcessor() {
+        this(new com.example.springload.service.processor.metrics.LoadMetricsRegistry());
+    }
+
     @Override
     public TaskType supportedTaskType() {
         return TaskType.REST_LOAD;
