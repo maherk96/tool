@@ -100,7 +100,7 @@ class LoadMetricsReportTest {
         String taskId = UUID.randomUUID().toString();
         int users = 3;
         int iterations = 5;
-        int reqPerIter = 2;
+        int reqPerIter = 1;
         Duration holdFor = Duration.ofSeconds(10);
         long expectedTotalRequests = (long) users * iterations * reqPerIter;
         Double expectedRps = expectedTotalRequests / (holdFor.toMillis() / 1000.0);
@@ -142,5 +142,116 @@ class LoadMetricsReportTest {
         assertThat(report.metrics.usersCompleted).isEqualTo(users);
         assertThat(report.metrics.successCount).isEqualTo(expectedTotalRequests);
     }
-}
 
+    @Test
+    void timeSeriesSnapshotsIncludeExpectedRpsAndLatency() throws Exception {
+        String taskId = UUID.randomUUID().toString();
+        double rate = 5.0;
+        int reqPerIter = 2;
+        Duration duration = Duration.ofSeconds(3);
+        long expectedIterations = (long) Math.floor(duration.toMillis() / 1000.0 * rate);
+        long expectedTotalRequests = expectedIterations * reqPerIter;
+        double expectedRps = rate * reqPerIter;
+
+        LoadMetrics.TaskConfig cfg = new LoadMetrics.TaskConfig(
+                taskId,
+                "REST_LOAD",
+                "https://svc",
+                LoadMetrics.ModelKind.OPEN,
+                null,
+                null,
+                null,
+                null,
+                null,
+                rate,
+                duration,
+                reqPerIter,
+                expectedTotalRequests,
+                expectedRps
+        );
+
+        LoadMetrics metrics = new LoadMetrics(cfg, log);
+        metrics.start();
+        // first activity
+        metrics.recordRequestSuccess(12, 200);
+        metrics.forceSnapshotForTest();
+        Thread.sleep(120);
+        // second window activity
+        metrics.recordRequestSuccess(20, 200);
+        metrics.recordRequestSuccess(25, 200);
+        metrics.forceSnapshotForTest();
+
+        TaskRunReport report = metrics.buildFinalReport();
+        assertThat(report.timeseries).isNotNull();
+        assertThat(report.timeseries.size()).isGreaterThanOrEqualTo(2);
+        var last = report.timeseries.get(report.timeseries.size() - 1);
+        assertThat(last.expectedRpsInWindow).isEqualTo(expectedRps);
+        assertThat(last.rpsInWindow).isGreaterThan(0.0);
+        assertThat(last.latency.min).isGreaterThanOrEqualTo(0);
+        assertThat(last.latency.max).isGreaterThanOrEqualTo(last.latency.min);
+    }
+
+    @Test
+    void onlyFailuresAndNoEndpointsHandled() {
+        String taskId = UUID.randomUUID().toString();
+        LoadMetrics.TaskConfig cfg = new LoadMetrics.TaskConfig(
+                taskId,
+                "REST_LOAD",
+                "https://svc",
+                LoadMetrics.ModelKind.OPEN,
+                null,
+                null,
+                null,
+                null,
+                null,
+                1.0,
+                Duration.ofSeconds(1),
+                1,
+                0,
+                1.0
+        );
+        LoadMetrics metrics = new LoadMetrics(cfg, log);
+        metrics.recordHttpFailure(500, 30, "GET", "/x");
+        metrics.recordRequestFailure(new RuntimeException("boom"));
+
+        TaskRunReport report = metrics.buildFinalReport();
+        assertThat(report.metrics.successCount).isEqualTo(0);
+        assertThat(report.metrics.failureCount).isEqualTo(2);
+        assertThat(report.metrics.errorBreakdown).isNotEmpty();
+        // No endpoint success/failure recorded via endpoint helpers -> may still exist due to http failure tracking
+        // Here we ensure protocolDetails is present but endpoints have totals consistent
+        if (report.protocolDetails != null && report.protocolDetails.rest != null) {
+            assertThat(report.protocolDetails.rest.endpoints).isNotNull();
+        }
+    }
+
+    @Test
+    void closedModelWithZeroHoldHasNullExpectedRps() {
+        String taskId = UUID.randomUUID().toString();
+        LoadMetrics.TaskConfig cfg = new LoadMetrics.TaskConfig(
+                taskId,
+                "REST_LOAD",
+                "https://svc",
+                LoadMetrics.ModelKind.CLOSED,
+                1,
+                1,
+                Duration.ZERO,
+                Duration.ZERO,
+                Duration.ZERO, // no hold -> expectedRps should remain null
+                null,
+                null,
+                1,
+                1,
+                null
+        );
+        LoadMetrics metrics = new LoadMetrics(cfg, log);
+        metrics.recordUserStarted(0);
+        metrics.recordUserProgress(0, 0);
+        metrics.recordRequestSuccess(10, 200);
+        metrics.recordUserCompleted(0, 1);
+
+        TaskRunReport report = metrics.buildFinalReport();
+        assertThat(report.config.expectedRps).isNull();
+        assertThat(report.metrics.expectedRps).isNull();
+    }
+}

@@ -307,6 +307,11 @@ public class LoadMetrics {
         lastSnapshotAt = now;
     }
 
+    // Test helper to trigger a snapshot without waiting for the scheduler
+    public void forceSnapshotForTest() {
+        snapshot();
+    }
+
     private void logFinalSummary() {
         double rps = achievedRps();
         StringBuilder sb = new StringBuilder();
