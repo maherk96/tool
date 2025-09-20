@@ -141,36 +141,41 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
         OpenLoadExecutor.OpenLoadParameters parameters =
                 new OpenLoadExecutor.OpenLoadParameters(rate, maxConcurrent, duration);
 
-        OpenLoadExecutor.OpenLoadResult result = OpenLoadExecutor.execute(
-                taskId,
-                parameters,
-                cancelled::get,
-                () -> {
-                    try {
-                        executeAllScenarios(client, testSpec.getScenarios(), thinkTime, cancelled, metrics, restMetrics);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                    }
-                },
-                log);
-
-        metrics.stopAndSummarize();
-        metricsRegistry.complete(taskId, metrics.snapshotNow());
-        TaskRunReport report = metrics.buildFinalReport();
-        metricsRegistry.saveReport(taskId, report);
+        OpenLoadExecutor.OpenLoadResult result = null;
         try {
-            log.info("Task {} run report:\n{}", taskId, JsonUtil.toJson(report));
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-            log.info("Task {} run report (unformatted): {}", taskId, report);
+            result = OpenLoadExecutor.execute(
+                    taskId,
+                    parameters,
+                    cancelled::get,
+                    () -> {
+                        try {
+                            executeAllScenarios(client, testSpec.getScenarios(), thinkTime, cancelled, metrics, restMetrics);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                    },
+                    log);
+        } finally {
+            metrics.stopAndSummarize();
+            metricsRegistry.complete(taskId, metrics.snapshotNow());
+            TaskRunReport report = metrics.buildFinalReport();
+            metricsRegistry.saveReport(taskId, report);
+            try {
+                log.info("Task {} run report:\n{}", taskId, JsonUtil.toJson(report));
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                log.info("Task {} run report (unformatted): {}", taskId, report);
+            }
         }
 
-        log.info("Open load completed: launched={} completed={} cancelled={} rate={} maxConcurrent={} duration={}",
-                result.launched(),
-                result.completed(),
-                result.cancelled(),
-                rate,
-                maxConcurrent,
-                duration);
+        if (result != null) {
+            log.info("Open load completed: launched={} completed={} cancelled={} rate={} maxConcurrent={} duration={}",
+                    result.launched(),
+                    result.completed(),
+                    result.cancelled(),
+                    rate,
+                    maxConcurrent,
+                    duration);
+        }
     }
 
     private void executeClosedModel(UUID taskId,
@@ -213,38 +218,44 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
         ClosedLoadExecutor.ClosedLoadParameters parameters =
                 new ClosedLoadExecutor.ClosedLoadParameters(users, iterations, warmup, rampUp, holdFor);
 
-        ClosedLoadExecutor.ClosedLoadResult result = ClosedLoadExecutor.execute(
-                taskId,
-                parameters,
-                cancelled::get,
-                (userIndex, iteration) -> {
-                    if (iteration == 0) {
-                        metrics.recordUserStarted(userIndex);
-                    }
-                    metrics.recordUserProgress(userIndex, iteration);
-                    executeAllScenarios(client, testSpec.getScenarios(), thinkTime, cancelled, metrics, restMetrics);
-                    if (iteration == (iterations - 1)) {
-                        metrics.recordUserCompleted(userIndex, iterations);
-                    }
-                },
-                log);
-
-        metrics.stopAndSummarize();
-        metricsRegistry.complete(taskId, metrics.snapshotNow());
-        TaskRunReport report = metrics.buildFinalReport();
-        metricsRegistry.saveReport(taskId, report);
+        ClosedLoadExecutor.ClosedLoadResult result = null;
         try {
-            log.info("Task {} run report:\n{}", taskId, JsonUtil.toJson(report));
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-            log.info("Task {} run report (unformatted): {}", taskId, report);
+            result = ClosedLoadExecutor.execute(
+                    taskId,
+                    parameters,
+                    cancelled::get,
+                    (userIndex, iteration) -> {
+                        if (iteration == 0) {
+                            metrics.recordUserStarted(userIndex);
+                        }
+                        metrics.recordUserProgress(userIndex, iteration);
+                        executeAllScenarios(client, testSpec.getScenarios(), thinkTime, cancelled, metrics, restMetrics);
+                        if (iteration == (iterations - 1)) {
+                            metrics.recordUserCompleted(userIndex, iterations);
+                        }
+                    },
+                    log);
+        } finally {
+            // Always stop snapshots and publish final snapshot/report even on failure
+            metrics.stopAndSummarize();
+            metricsRegistry.complete(taskId, metrics.snapshotNow());
+            TaskRunReport report = metrics.buildFinalReport();
+            metricsRegistry.saveReport(taskId, report);
+            try {
+                log.info("Task {} run report:\n{}", taskId, JsonUtil.toJson(report));
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                log.info("Task {} run report (unformatted): {}", taskId, report);
+            }
         }
 
-        log.info("Task {} closed load finished: usersCompleted={}/{} cancelled={} holdExpired={}",
-                taskId,
-                result.completedUsers(),
-                result.totalUsers(),
-                result.cancelled(),
-                result.holdExpired());
+        if (result != null) {
+            log.info("Task {} closed load finished: usersCompleted={}/{} cancelled={} holdExpired={}",
+                    taskId,
+                    result.completedUsers(),
+                    result.totalUsers(),
+                    result.cancelled(),
+                    result.holdExpired());
+        }
     }
 
     private void executeAllScenarios(LoadHttpClient client,

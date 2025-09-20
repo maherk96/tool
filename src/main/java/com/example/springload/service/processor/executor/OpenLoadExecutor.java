@@ -58,6 +58,9 @@ public final class OpenLoadExecutor {
 
         Runnable scheduleLoop = () -> {
             try {
+                if (cancelled.get()) {
+                    return;
+                }
                 if (shouldStop(cancellationRequested)) {
                     cancelled.set(true);
                     return;
@@ -70,7 +73,7 @@ public final class OpenLoadExecutor {
                     return;
                 }
                 launchedTasks.incrementAndGet();
-                scheduler.execute(() -> executeIteration(iterationTask, permits, completedTasks, logger));
+                scheduler.execute(() -> executeIteration(iterationTask, permits, completedTasks, logger, cancelled));
             } catch (Throwable throwable) {
                 logger.error("Task {} open load scheduler encountered error: {}", taskId, throwable.getMessage(), throwable);
                 cancelled.set(true);
@@ -106,11 +109,14 @@ public final class OpenLoadExecutor {
     private static void executeIteration(Runnable iterationTask,
                                          Semaphore permits,
                                          AtomicLong completedTasks,
-                                         Logger logger) {
+                                         Logger logger,
+                                         AtomicBoolean cancelled) {
         try {
             iterationTask.run();
         } catch (Exception ex) {
             logger.error("Open load iteration failed: {}", ex.getMessage(), ex);
+            // Mark as cancelled to stop further scheduling when iterations consistently fail
+            cancelled.set(true);
         } finally {
             permits.release();
             completedTasks.incrementAndGet();
