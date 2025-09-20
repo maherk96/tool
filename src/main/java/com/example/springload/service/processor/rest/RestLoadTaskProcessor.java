@@ -135,6 +135,8 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
         ), log);
         metrics.start();
         metricsRegistry.register(taskId, metrics);
+        var restMetrics = new com.example.springload.service.processor.metrics.RestProtocolMetrics();
+        metrics.registerProtocolMetrics(restMetrics);
 
         OpenLoadExecutor.OpenLoadParameters parameters =
                 new OpenLoadExecutor.OpenLoadParameters(rate, maxConcurrent, duration);
@@ -145,7 +147,7 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
                 cancelled::get,
                 () -> {
                     try {
-                        executeAllScenarios(client, testSpec.getScenarios(), thinkTime, cancelled, metrics);
+                        executeAllScenarios(client, testSpec.getScenarios(), thinkTime, cancelled, metrics, restMetrics);
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
                     }
@@ -205,6 +207,8 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
         ), log);
         metrics.start();
         metricsRegistry.register(taskId, metrics);
+        var restMetrics = new com.example.springload.service.processor.metrics.RestProtocolMetrics();
+        metrics.registerProtocolMetrics(restMetrics);
 
         ClosedLoadExecutor.ClosedLoadParameters parameters =
                 new ClosedLoadExecutor.ClosedLoadParameters(users, iterations, warmup, rampUp, holdFor);
@@ -218,7 +222,7 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
                         metrics.recordUserStarted(userIndex);
                     }
                     metrics.recordUserProgress(userIndex, iteration);
-                    executeAllScenarios(client, testSpec.getScenarios(), thinkTime, cancelled, metrics);
+                    executeAllScenarios(client, testSpec.getScenarios(), thinkTime, cancelled, metrics, restMetrics);
                     if (iteration == (iterations - 1)) {
                         metrics.recordUserCompleted(userIndex, iterations);
                     }
@@ -247,7 +251,8 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
                                      List<Scenario> scenarios,
                                      ThinkTimeStrategy thinkTime,
                                      AtomicBoolean cancelled,
-                                     LoadMetrics metrics) throws InterruptedException {
+                                     LoadMetrics metrics,
+                                     com.example.springload.service.processor.metrics.RestProtocolMetrics restMetrics) throws InterruptedException {
         if (scenarios == null || scenarios.isEmpty()) {
             throw new IllegalArgumentException("testSpec.scenarios must contain at least one scenario");
         }
@@ -263,14 +268,15 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
                 try {
                     var response = client.execute(request);
                     if (response.getStatusCode() >= 400) {
-                        metrics.recordHttpFailure(response.getStatusCode(), response.getResponseTimeMs(), request.getMethod().name(), request.getPath());
+                        metrics.recordHttpFailure(response.getStatusCode(), response.getResponseTimeMs());
+                        restMetrics.recordHttpFailure(response.getStatusCode(), response.getResponseTimeMs(), request.getMethod().name(), request.getPath(), null);
                     } else {
                         metrics.recordRequestSuccess(response.getResponseTimeMs(), response.getStatusCode());
-                        metrics.recordEndpointSuccess(request.getMethod().name(), request.getPath(), response.getResponseTimeMs(), response.getStatusCode());
+                        restMetrics.recordSuccess(request.getMethod().name(), request.getPath(), response.getResponseTimeMs(), response.getStatusCode());
                     }
                 } catch (RuntimeException ex) {
                     metrics.recordRequestFailure(ex);
-                    metrics.recordEndpointFailure(request.getMethod().name(), request.getPath(), "EXCEPTION");
+                    restMetrics.recordExceptionFailure(request.getMethod().name(), request.getPath(), "EXCEPTION");
                     throw ex;
                 }
                 if (thinkTime.isEnabled()) {

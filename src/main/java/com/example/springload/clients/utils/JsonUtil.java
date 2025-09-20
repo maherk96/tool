@@ -1,5 +1,6 @@
 package com.example.springload.clients.utils;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.json.JsonReadFeature;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -31,6 +32,8 @@ public class JsonUtil {
             .build();
 
     MAPPER.registerModule(new JavaTimeModule());
+    MAPPER.setSerializationInclusion(JsonInclude.Include.NON_EMPTY); // <-- Add this line
+
   }
 
   private JsonUtil() {

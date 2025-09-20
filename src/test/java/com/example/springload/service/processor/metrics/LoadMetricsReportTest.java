@@ -44,16 +44,21 @@ class LoadMetricsReportTest {
 
         LoadMetrics metrics = new LoadMetrics(cfg, log);
         metrics.start();
+        // plug REST protocol metrics
+        RestProtocolMetrics rest = new RestProtocolMetrics();
+        metrics.registerProtocolMetrics(rest);
 
         // simulate successes and failures
-        metrics.recordEndpointSuccess("GET", "/v1/health", 20, 200);
+        rest.recordSuccess("GET", "/v1/health", 20, 200);
         metrics.recordRequestSuccess(20, 200);
 
-        metrics.recordEndpointSuccess("GET", "/v1/users", 35, 204);
+        rest.recordSuccess("GET", "/v1/users", 35, 204);
         metrics.recordRequestSuccess(35, 204);
 
-        metrics.recordHttpFailure(500, 50, "GET", "/v1/users");
-        metrics.recordHttpFailure(404, 15, "GET", "/v1/unknown");
+        metrics.recordHttpFailure(500, 50);
+        rest.recordHttpFailure(500, 50, "GET", "/v1/users", null);
+        metrics.recordHttpFailure(404, 15);
+        rest.recordHttpFailure(404, 15, "GET", "/v1/unknown", null);
         metrics.recordRequestFailure(new RuntimeException("connection failed"));
 
         metrics.stopAndSummarize();
@@ -211,7 +216,7 @@ class LoadMetricsReportTest {
                 1.0
         );
         LoadMetrics metrics = new LoadMetrics(cfg, log);
-        metrics.recordHttpFailure(500, 30, "GET", "/x");
+        metrics.recordHttpFailure(500, 30);
         metrics.recordRequestFailure(new RuntimeException("boom"));
 
         TaskRunReport report = metrics.buildFinalReport();
