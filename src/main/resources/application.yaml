@@ -1,11 +1,20 @@
 spring:
   application:
-    name: spring-load
+    name: load-execution-runner
+
 server:
-  port: 8012
+  servlet:
+    context-path: "/load-execution-runner/"
+  port: "8090"
+  compression:
+    enabled: true
+    mime-types: text/html,text/xml,text/plain,text/css,text/javascript,application/javascript,application/json
+    min-response-size: 1024
+
+springdoc:
+  pathsToMatch: /api/**
 
 load:
   tasks:
     concurrency: 1
     history-size: 50
-    simulated-duration-ms: 1000

@@ -14,7 +14,7 @@ import java.util.UUID;
 @Mapper(componentModel = "spring")
 public interface TaskMapper {
 
-    @Mapping(target = "taskId", expression = "java(UUID.randomUUID())")
+    @Mapping(target = "id", expression = "java(UUID.randomUUID())")
     @Mapping(target = "createdAt", expression = "java(Instant.now())")
     @Mapping(target = "taskType", source = "taskType", qualifiedByName = "mapTaskType")
     LoadTask toDomain(TaskSubmissionRequest request);
