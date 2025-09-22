@@ -287,7 +287,7 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
                     }
                 } catch (RuntimeException ex) {
                     metrics.recordRequestFailure(ex);
-                    restMetrics.recordExceptionFailure(request.getMethod().name(), request.getPath(), "EXCEPTION");
+                    // Do not attribute to REST endpoint metrics: request never reached the server
                     throw ex;
                 }
                 if (thinkTime.isEnabled()) {

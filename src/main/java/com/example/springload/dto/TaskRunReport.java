@@ -56,6 +56,7 @@ public class TaskRunReport {
         public double achievedRps;
         public Latency latency;
         public List<ErrorItem> errorBreakdown;
+        public List<ErrorSample> errorSamples; // optional: recent sampled exceptions
         public List<UserCompletion> userCompletionHistogram; // optional
         public int usersStarted;
         public int usersCompleted;
@@ -73,6 +74,12 @@ public class TaskRunReport {
     public static class ErrorItem {
         public String type;
         public long count;
+    }
+
+    public static class ErrorSample {
+        public String type;    // category: TIMEOUT, CONNECT, EXCEPTION, HTTP_4xx, etc.
+        public String message; // exception message if available
+        public List<String> stack; // top N frames formatted
     }
 
     public static class UserCompletion {

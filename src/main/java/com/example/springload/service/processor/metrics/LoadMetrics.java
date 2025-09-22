@@ -57,7 +57,16 @@ public class LoadMetrics {
     private final AtomicLong latencySum = new AtomicLong(0);
     private final Reservoir latencyReservoir = new Reservoir(5000);
 
+    // window-local latency aggregates (reset every snapshot)
+    private final AtomicLong windowLatencyMin = new AtomicLong(Long.MAX_VALUE);
+    private final AtomicLong windowLatencyMax = new AtomicLong(0);
+    private final AtomicLong windowLatencySum = new AtomicLong(0);
+    private final AtomicLong windowRequestCount = new AtomicLong(0);
+
     private final Map<String, AtomicLong> errorBreakdown = new ConcurrentHashMap<>();
+    // keep a small sample of recent exceptions for reporting/debugging
+    private final java.util.List<ErrorSample> errorSamples = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private static final int MAX_ERROR_SAMPLES = 5;
     private final java.util.List<ProtocolMetricsProvider> protocolProviders = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     // user index -> current iteration (0-based)
@@ -128,6 +137,7 @@ public class LoadMetrics {
         latencySum.addAndGet(Math.max(0, latencyMs));
         updateMinMax(latencyMs);
         latencyReservoir.add(latencyMs);
+        updateWindow(latencyMs);
     }
 
     public void recordRequestFailure(Throwable t) {
@@ -135,6 +145,9 @@ public class LoadMetrics {
         requests.incrementAndGet();
         String key = classifyError(t);
         errorBreakdown.computeIfAbsent(key, k -> new AtomicLong()).incrementAndGet();
+        if (t != null && errorSamples.size() < MAX_ERROR_SAMPLES) {
+            errorSamples.add(buildSample(key, t));
+        }
     }
 
     public void registerProtocolMetrics(ProtocolMetricsProvider provider) {
@@ -149,6 +162,7 @@ public class LoadMetrics {
         latencyReservoir.add(latencyMs);
         String key = category == null || category.isBlank() ? "UNKNOWN" : category;
         errorBreakdown.computeIfAbsent(key, k -> new AtomicLong()).incrementAndGet();
+        updateWindow(latencyMs);
     }
     // endregion
 
@@ -280,18 +294,25 @@ public class LoadMetrics {
         Instant now = Instant.now();
         long req = requests.get();
         long err = errors.get();
-        long min = latencyMin.get();
-        long max = latencyMax.get();
-        long avg = latencyAvgMs().orElse(0L);
+        long minLocal = windowLatencyMin.get();
+        long maxLocal = windowLatencyMax.get();
+        long countLocal = windowRequestCount.get();
+        long sumLocal = windowLatencySum.get();
+        long avgLocal = countLocal == 0 ? 0L : sumLocal / countLocal;
         timeSeries.add(new TimeSeriesPoint(now,
                 req,
                 err,
-                min == Long.MAX_VALUE ? 0 : min,
-                max,
-                avg,
+                minLocal == Long.MAX_VALUE ? 0 : minLocal,
+                maxLocal,
+                avgLocal,
                 usersStarted.get(),
                 usersCompleted.get()));
         lastSnapshotAt = now;
+        // reset window accumulators for next interval
+        windowLatencyMin.set(Long.MAX_VALUE);
+        windowLatencyMax.set(0);
+        windowLatencySum.set(0);
+        windowRequestCount.set(0);
     }
 
     // Test helper to trigger a snapshot without waiting for the scheduler
@@ -388,6 +409,18 @@ public class LoadMetrics {
             errs.add(item);
         }
         m.errorBreakdown = java.util.List.copyOf(errs);
+        // error samples
+        if (!errorSamples.isEmpty()) {
+            java.util.List<TaskRunReport.ErrorSample> samples = new java.util.ArrayList<>();
+            for (ErrorSample s : errorSamples) {
+                TaskRunReport.ErrorSample es = new TaskRunReport.ErrorSample();
+                es.type = s.type;
+                es.message = s.message;
+                es.stack = java.util.List.copyOf(s.stack);
+                samples.add(es);
+            }
+            m.errorSamples = java.util.List.copyOf(samples);
+        }
         // user histogram
         java.util.List<TaskRunReport.UserCompletion> histogram = new java.util.ArrayList<>();
         for (Map.Entry<Integer, Instant> e : userEndTimes.entrySet()) {
@@ -448,8 +481,16 @@ public class LoadMetrics {
         String cls = t.getClass().getSimpleName();
         String msg = String.valueOf(t.getMessage()).toLowerCase();
         if (cls.contains("Timeout") || msg.contains("timed out") || msg.contains("timeout")) return "TIMEOUT";
-        if (msg.contains("connection") || msg.contains("connect")) return "CONNECT";
-        return "EXCEPTION";
+        if (cls.contains("Connect") || msg.contains("connection") || msg.contains("connect")) return "CONNECT";
+        return (cls == null || cls.isBlank()) ? "EXCEPTION" : cls;
+    }
+
+    private void updateWindow(long latencyMs) {
+        long v = Math.max(0, latencyMs);
+        windowRequestCount.incrementAndGet();
+        windowLatencySum.addAndGet(v);
+        windowLatencyMax.accumulateAndGet(v, Math::max);
+        windowLatencyMin.accumulateAndGet(v, Math::min);
     }
 
     // no protocol-specific categorization here; callers should provide category labels
@@ -459,6 +500,25 @@ public class LoadMetrics {
         for (var e : errorBreakdown.entrySet()) map.put(e.getKey(), e.getValue().get());
         return java.util.Map.copyOf(map);
     }
+
+    private ErrorSample buildSample(String type, Throwable t) {
+        String message = String.valueOf(t.getMessage());
+        java.util.List<String> frames = new java.util.ArrayList<>();
+        StackTraceElement[] st = t.getStackTrace();
+        int    limit = Math.min(8, st != null ? st.length : 0);
+        for (int i = 0; i < limit; i++) {
+            StackTraceElement e = st[i];
+            frames.add(e.getClassName() + "." + e.getMethodName() + "(" + e.getFileName() + ":" + e.getLineNumber() + ")");
+        }
+        // add cause summary if present
+        Throwable cause = t.getCause();
+        if (cause != null) {
+            frames.add("Caused by: " + cause.getClass().getName() + ": " + String.valueOf(cause.getMessage()));
+        }
+        return new ErrorSample(type, message, frames);
+    }
+
+    private record ErrorSample(String type, String message, java.util.List<String> stack) {}
 
     public java.util.List<TimeSeriesPoint> getTimeSeries() { return java.util.List.copyOf(timeSeries); }
 

@@ -24,10 +24,8 @@ public class RestProtocolMetrics implements ProtocolMetricsProvider {
         return category;
     }
 
-    public void recordExceptionFailure(String method, String path, String category) {
-        EndpointStats s = endpointStats.computeIfAbsent(key(method, path), k -> new EndpointStats(method, path));
-        s.onFailure(category);
-    }
+    // Intentionally no method for connection/exception failures without HTTP response:
+    // such failures do not belong in per-endpoint HTTP status breakdowns.
 
     private String key(String method, String path) {
         return (method == null ? "" : method) + " " + (path == null ? "" : path);
