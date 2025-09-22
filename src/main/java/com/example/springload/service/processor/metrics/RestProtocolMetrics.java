@@ -17,11 +17,11 @@ public class RestProtocolMetrics implements ProtocolMetricsProvider {
         s.onSuccess(latencyMs, statusCode);
     }
 
-    public void recordHttpFailure(int statusCode, long latencyMs, String method, String path, java.util.function.Consumer<String> errorCategorizer) {
-        // let the caller update global error breakdown; here focus on endpoint aggregates
+    public String recordHttpFailure(int statusCode, String method, String path) {
         EndpointStats s = endpointStats.computeIfAbsent(key(method, path), k -> new EndpointStats(method, path));
         String category = httpCategory(statusCode);
         s.onFailure(category);
+        return category;
     }
 
     public void recordExceptionFailure(String method, String path, String category) {
@@ -113,4 +113,3 @@ public class RestProtocolMetrics implements ProtocolMetricsProvider {
         }
     }
 }
-

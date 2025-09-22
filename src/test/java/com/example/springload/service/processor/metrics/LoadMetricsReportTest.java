@@ -2,6 +2,7 @@ package com.example.springload.service.processor.metrics;
 
 import com.example.springload.clients.utils.JsonUtil;
 import com.example.springload.dto.TaskRunReport;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,19 +51,20 @@ class LoadMetricsReportTest {
 
         // simulate successes and failures
         rest.recordSuccess("GET", "/v1/health", 20, 200);
-        metrics.recordRequestSuccess(20, 200);
+        metrics.recordRequestSuccess(20);
 
         rest.recordSuccess("GET", "/v1/users", 35, 204);
-        metrics.recordRequestSuccess(35, 204);
+        metrics.recordRequestSuccess(35);
 
-        metrics.recordHttpFailure(500, 50);
-        rest.recordHttpFailure(500, 50, "GET", "/v1/users", null);
-        metrics.recordHttpFailure(404, 15);
-        rest.recordHttpFailure(404, 15, "GET", "/v1/unknown", null);
+        String c1 = rest.recordHttpFailure(500, "GET", "/v1/users");
+        metrics.recordFailure(c1, 50);
+        String c2 = rest.recordHttpFailure(404, "GET", "/v1/unknown");
+        metrics.recordFailure(c2, 15);
         metrics.recordRequestFailure(new RuntimeException("connection failed"));
 
         metrics.stopAndSummarize();
         TaskRunReport report = metrics.buildFinalReport();
+        System.out.println(JsonUtil.toJson(report));
 
         assertThat(report.taskId).isEqualTo(taskId);
         assertThat(report.taskType).isEqualTo("REST_LOAD");
@@ -101,7 +103,7 @@ class LoadMetricsReportTest {
     }
 
     @Test
-    void buildsReportForClosedModelComputesExpectedRpsFromHold() {
+    void buildsReportForClosedModelComputesExpectedRpsFromHold() throws JsonProcessingException {
         String taskId = UUID.randomUUID().toString();
         int users = 3;
         int iterations = 5;
@@ -133,13 +135,13 @@ class LoadMetricsReportTest {
             metrics.recordUserStarted(u);
             for (int it = 0; it < iterations; it++) {
                 metrics.recordUserProgress(u, it);
-                metrics.recordRequestSuccess(10 + it, 200);
+                metrics.recordRequestSuccess(10 + it);
             }
             metrics.recordUserCompleted(u, iterations);
         }
 
         TaskRunReport report = metrics.buildFinalReport();
-
+        System.out.println(JsonUtil.toJson(report));
         assertThat(report.config.expectedTotalRequests).isEqualTo(expectedTotalRequests);
         assertThat(report.config.expectedRps).isNotNull();
         assertThat(Math.abs(report.config.expectedRps - expectedRps)).isLessThan(0.001);
@@ -178,15 +180,16 @@ class LoadMetricsReportTest {
         LoadMetrics metrics = new LoadMetrics(cfg, log);
         metrics.start();
         // first activity
-        metrics.recordRequestSuccess(12, 200);
+        metrics.recordRequestSuccess(12);
         metrics.forceSnapshotForTest();
         Thread.sleep(120);
         // second window activity
-        metrics.recordRequestSuccess(20, 200);
-        metrics.recordRequestSuccess(25, 200);
+        metrics.recordRequestSuccess(20);
+        metrics.recordRequestSuccess(25);
         metrics.forceSnapshotForTest();
 
         TaskRunReport report = metrics.buildFinalReport();
+        System.out.println(JsonUtil.toJson(report));
         assertThat(report.timeseries).isNotNull();
         assertThat(report.timeseries.size()).isGreaterThanOrEqualTo(2);
         var last = report.timeseries.get(report.timeseries.size() - 1);
@@ -197,7 +200,7 @@ class LoadMetricsReportTest {
     }
 
     @Test
-    void onlyFailuresAndNoEndpointsHandled() {
+    void onlyFailuresAndNoEndpointsHandled() throws JsonProcessingException {
         String taskId = UUID.randomUUID().toString();
         LoadMetrics.TaskConfig cfg = new LoadMetrics.TaskConfig(
                 taskId,
@@ -216,10 +219,15 @@ class LoadMetricsReportTest {
                 1.0
         );
         LoadMetrics metrics = new LoadMetrics(cfg, log);
-        metrics.recordHttpFailure(500, 30);
+        // register REST protocol metrics to categorize HTTP failures
+        RestProtocolMetrics rest = new RestProtocolMetrics();
+        metrics.registerProtocolMetrics(rest);
+        String cat = rest.recordHttpFailure(500, "GET", "/err");
+        metrics.recordFailure(cat, 30);
         metrics.recordRequestFailure(new RuntimeException("boom"));
 
         TaskRunReport report = metrics.buildFinalReport();
+        System.out.println(JsonUtil.toJson(report));
         assertThat(report.metrics.successCount).isEqualTo(0);
         assertThat(report.metrics.failureCount).isEqualTo(2);
         assertThat(report.metrics.errorBreakdown).isNotEmpty();
@@ -231,7 +239,7 @@ class LoadMetricsReportTest {
     }
 
     @Test
-    void closedModelWithZeroHoldHasNullExpectedRps() {
+    void closedModelWithZeroHoldHasNullExpectedRps() throws JsonProcessingException {
         String taskId = UUID.randomUUID().toString();
         LoadMetrics.TaskConfig cfg = new LoadMetrics.TaskConfig(
                 taskId,
@@ -252,10 +260,11 @@ class LoadMetricsReportTest {
         LoadMetrics metrics = new LoadMetrics(cfg, log);
         metrics.recordUserStarted(0);
         metrics.recordUserProgress(0, 0);
-        metrics.recordRequestSuccess(10, 200);
+        metrics.recordRequestSuccess(10);
         metrics.recordUserCompleted(0, 1);
 
         TaskRunReport report = metrics.buildFinalReport();
+        System.out.println(JsonUtil.toJson(report));
         assertThat(report.config.expectedRps).isNull();
         assertThat(report.metrics.expectedRps).isNull();
     }

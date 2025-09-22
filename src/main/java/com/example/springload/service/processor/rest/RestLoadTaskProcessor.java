@@ -279,10 +279,10 @@ public class RestLoadTaskProcessor implements LoadTaskProcessor {
                 try {
                     var response = client.execute(request);
                     if (response.getStatusCode() >= 400) {
-                        metrics.recordHttpFailure(response.getStatusCode(), response.getResponseTimeMs());
-                        restMetrics.recordHttpFailure(response.getStatusCode(), response.getResponseTimeMs(), request.getMethod().name(), request.getPath(), null);
+                        String category = restMetrics.recordHttpFailure(response.getStatusCode(), request.getMethod().name(), request.getPath());
+                        metrics.recordFailure(category, response.getResponseTimeMs());
                     } else {
-                        metrics.recordRequestSuccess(response.getResponseTimeMs(), response.getStatusCode());
+                        metrics.recordRequestSuccess(response.getResponseTimeMs());
                         restMetrics.recordSuccess(request.getMethod().name(), request.getPath(), response.getResponseTimeMs(), response.getStatusCode());
                     }
                 } catch (RuntimeException ex) {

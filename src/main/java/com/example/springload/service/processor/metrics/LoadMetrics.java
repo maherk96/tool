@@ -123,7 +123,7 @@ public class LoadMetrics {
                 config.taskId(), userIndex + 1, totalIterationsCompleted, usersCompleted.get());
     }
 
-    public void recordRequestSuccess(long latencyMs, int statusCode) {
+    public void recordRequestSuccess(long latencyMs) {
         requests.incrementAndGet();
         latencySum.addAndGet(Math.max(0, latencyMs));
         updateMinMax(latencyMs);
@@ -141,14 +141,14 @@ public class LoadMetrics {
         protocolProviders.add(provider);
     }
 
-    public void recordHttpFailure(int statusCode, long latencyMs) {
+    public void recordFailure(String category, long latencyMs) {
         errors.incrementAndGet();
         requests.incrementAndGet();
         latencySum.addAndGet(Math.max(0, latencyMs));
         updateMinMax(latencyMs);
         latencyReservoir.add(latencyMs);
-        String category = httpCategory(statusCode);
-        errorBreakdown.computeIfAbsent(category, k -> new AtomicLong()).incrementAndGet();
+        String key = category == null || category.isBlank() ? "UNKNOWN" : category;
+        errorBreakdown.computeIfAbsent(key, k -> new AtomicLong()).incrementAndGet();
     }
     // endregion
 
@@ -452,12 +452,7 @@ public class LoadMetrics {
         return "EXCEPTION";
     }
 
-    private String httpCategory(int statusCode) {
-        if (statusCode >= 500) return "HTTP_5xx";
-        if (statusCode >= 400) return "HTTP_4xx";
-        if (statusCode >= 300) return "HTTP_3xx";
-        return "HTTP_" + statusCode;
-    }
+    // no protocol-specific categorization here; callers should provide category labels
 
     public Map<String, Long> errorBreakdown() {
         Map<String, Long> map = new java.util.HashMap<>();
