@@ -1,187 +1,182 @@
 package com.example.springload.web;
 
-import com.example.springload.dto.HealthResponse;
-import com.example.springload.dto.QueueStatusResponse;
-import com.example.springload.dto.TaskCancellationResponse;
-import com.example.springload.dto.TaskHistoryEntry;
-import com.example.springload.dto.TaskLiveMetricsResponse;
-import com.example.springload.dto.TaskMetricsResponse;
-import com.example.springload.dto.TaskRunReport;
-import com.example.springload.dto.TaskStatusResponse;
-import com.example.springload.dto.TaskSubmissionRequest;
-import com.example.springload.dto.TaskSubmissionResponse;
-import com.example.springload.dto.TaskSummaryResponse;
+import com.example.springload.dto.*;
 import com.example.springload.model.LoadTask;
 import com.example.springload.model.TaskStatus;
-import com.example.springload.model.TaskType;
 import com.example.springload.service.LoadTaskService;
 import com.example.springload.service.LoadTaskService.CancellationResult;
 import com.example.springload.service.LoadTaskService.TaskSubmissionOutcome;
+import com.example.springload.service.processor.metrics.LoadMetrics;
+import com.example.springload.service.processor.metrics.LoadMetricsRegistry;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
-import org.springframework.web.bind.annotation.DeleteMapping;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 
-import java.time.Instant;
-import java.util.Collection;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Set;
-import java.util.UUID;
-import com.example.springload.service.processor.metrics.LoadMetrics;
+import java.util.*;
 
+@Tag(name = "Load Tasks", description = "Endpoints for submitting, monitoring, and managing load execution tasks")
 @RestController
 @RequestMapping("/api/tasks")
 @Validated
 public class LoadTaskController {
 
-    private static final Logger log = LoggerFactory.getLogger(LoadTaskController.class);
-
     private final LoadTaskService loadTaskService;
-    private final com.example.springload.service.processor.metrics.LoadMetricsRegistry metricsRegistry;
+    private final LoadMetricsRegistry metricsRegistry;
+    private final TaskMapper taskMapper;
 
     public LoadTaskController(LoadTaskService loadTaskService,
-                              com.example.springload.service.processor.metrics.LoadMetricsRegistry metricsRegistry) {
+                              LoadMetricsRegistry metricsRegistry,
+                              TaskMapper taskMapper) {
         this.loadTaskService = loadTaskService;
         this.metricsRegistry = metricsRegistry;
+        this.taskMapper = taskMapper;
     }
 
+    @Operation(
+            summary = "Submit a new load task",
+            description = "Creates and queues a new load test task for execution.",
+            responses = {
+                    @ApiResponse(responseCode = "202", description = "Task accepted and queued",
+                            content = @Content(schema = @Schema(implementation = TaskSubmissionResponse.class))),
+                    @ApiResponse(responseCode = "400", description = "Invalid request payload",
+                            content = @Content(schema = @Schema(implementation = ErrorResponse.class))),
+                    @ApiResponse(responseCode = "503", description = "Service not accepting new tasks",
+                            content = @Content(schema = @Schema(implementation = TaskSubmissionResponse.class)))
+            }
+    )
     @PostMapping
-    public ResponseEntity<?> submitTask(@Valid @RequestBody TaskSubmissionRequest request) {
-        LoadTask loadTask;
-        try {
-            loadTask = mapToDomain(request);
-        } catch (IllegalArgumentException ex) {
-            return ResponseEntity.badRequest().body(Map.of("error", ex.getMessage()));
-        }
+    public ResponseEntity<TaskSubmissionResponse> submitTask(@Valid @RequestBody TaskSubmissionRequest request) {
+        LoadTask loadTask = taskMapper.toDomain(request);
+        Optional<TaskSubmissionOutcome> outcomeOpt = loadTaskService.submitTask(loadTask);
 
-        Optional<TaskSubmissionOutcome> submissionOutcome = loadTaskService.submitTask(loadTask);
-        if (submissionOutcome.isEmpty()) {
+        if (outcomeOpt.isEmpty()) {
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                    .body(Map.of("error", "Service is not accepting new tasks"));
+                    .body(new TaskSubmissionResponse(null, TaskStatus.CANCELLED, "Service not accepting new tasks"));
         }
 
-        TaskSubmissionOutcome outcome = submissionOutcome.get();
-        HttpStatus httpStatus = determineSubmissionHttpStatus(outcome);
-        TaskSubmissionResponse body = new TaskSubmissionResponse(outcome.getTaskId(), outcome.getStatus(), outcome.getMessage());
-        return ResponseEntity.status(httpStatus).body(body);
+        TaskSubmissionOutcome outcome = outcomeOpt.get();
+        return ResponseEntity.status(determineSubmissionHttpStatus(outcome))
+                .body(new TaskSubmissionResponse(outcome.getTaskId(), outcome.getStatus(), outcome.getMessage()));
     }
 
+    @Operation(
+            summary = "Get task status",
+            description = "Returns the current status of a specific task by its ID.",
+            responses = {
+                    @ApiResponse(responseCode = "200", description = "Task found",
+                            content = @Content(schema = @Schema(implementation = TaskStatusResponse.class))),
+                    @ApiResponse(responseCode = "404", description = "Task not found")
+            }
+    )
     @GetMapping("/{taskId}")
-    public ResponseEntity<TaskStatusResponse> getTaskStatus(@PathVariable("taskId") UUID taskId) {
+    public ResponseEntity<TaskStatusResponse> getTaskStatus(
+            @Parameter(description = "UUID of the task") @PathVariable UUID taskId) {
         return loadTaskService.getTaskStatus(taskId)
                 .map(ResponseEntity::ok)
-                .orElseGet(() -> ResponseEntity.status(HttpStatus.NOT_FOUND).build());
+                .orElse(ResponseEntity.notFound().build());
     }
 
+    @Operation(
+            summary = "Cancel a task",
+            description = "Attempts to cancel the specified task if it is still running or queued.",
+            responses = {
+                    @ApiResponse(responseCode = "200", description = "Task cancelled",
+                            content = @Content(schema = @Schema(implementation = TaskCancellationResponse.class))),
+                    @ApiResponse(responseCode = "404", description = "Task not found",
+                            content = @Content(schema = @Schema(implementation = ErrorResponse.class))),
+                    @ApiResponse(responseCode = "409", description = "Task not cancellable",
+                            content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
+            }
+    )
     @DeleteMapping("/{taskId}")
-    public ResponseEntity<?> cancelTask(@PathVariable("taskId") UUID taskId) {
+    public ResponseEntity<?> cancelTask(
+            @Parameter(description = "UUID of the task to cancel") @PathVariable UUID taskId) {
         CancellationResult result = loadTaskService.cancelTask(taskId);
         return switch (result.getState()) {
             case NOT_FOUND -> ResponseEntity.status(HttpStatus.NOT_FOUND)
-                    .body(Map.of("error", "Task not found"));
+                    .body(new ErrorResponse("Not Found", "Task not found"));
             case NOT_CANCELLABLE -> ResponseEntity.status(HttpStatus.CONFLICT)
-                    .body(Map.of("error", "Task cannot be cancelled in its current state"));
-            case CANCELLED -> {
-                TaskCancellationResponse body = new TaskCancellationResponse(taskId, TaskStatus.CANCELLED, "Task cancelled");
-                yield ResponseEntity.ok(body);
-            }
+                    .body(new ErrorResponse("Conflict", "Task cannot be cancelled in its current state"));
+            case CANCELLED -> ResponseEntity.ok(new TaskCancellationResponse(taskId, TaskStatus.CANCELLED, "Task cancelled"));
             case CANCELLATION_REQUESTED -> {
-                TaskStatusResponse latest = loadTaskService.getTaskStatus(taskId).orElse(null);
-                TaskStatus currentStatus = latest != null ? latest.getStatus() : TaskStatus.PROCESSING;
-                TaskCancellationResponse body = new TaskCancellationResponse(taskId, currentStatus, "Cancellation requested");
-                yield ResponseEntity.ok(body);
+                TaskStatus currentStatus = loadTaskService.getTaskStatus(taskId)
+                        .map(TaskStatusResponse::getStatus)
+                        .orElse(TaskStatus.PROCESSING);
+                yield ResponseEntity.ok(new TaskCancellationResponse(taskId, currentStatus, "Cancellation requested"));
             }
         };
     }
 
+    @Operation(
+            summary = "Get tasks",
+            description = "Retrieves all tasks, optionally filtered by status."
+    )
     @GetMapping
-    public ResponseEntity<?> getTasks(@RequestParam(name = "status", required = false) String statusFilter) {
-        if (statusFilter == null) {
-            Collection<TaskStatusResponse> all = loadTaskService.getAllTasks();
-            return ResponseEntity.ok(all);
+    public ResponseEntity<?> getTasks(
+            @Parameter(description = "Optional status filter (e.g., QUEUED, PROCESSING)") @RequestParam(required = false) String status) {
+        if (status == null) {
+            return ResponseEntity.ok(loadTaskService.getAllTasks());
         }
-        try {
-            TaskStatus status = TaskStatus.valueOf(statusFilter.toUpperCase());
-            List<TaskSummaryResponse> filtered = loadTaskService.getTasksByStatus(status);
-            return ResponseEntity.ok(filtered);
-        } catch (IllegalArgumentException ex) {
-            return ResponseEntity.badRequest().body(Map.of("error", "Unknown status: " + statusFilter));
-        }
+        TaskStatus taskStatus = TaskStatus.valueOf(status.toUpperCase());
+        return ResponseEntity.ok(loadTaskService.getTasksByStatus(taskStatus));
     }
 
+    @Operation(summary = "Get task history", description = "Returns a list of recently executed tasks.")
     @GetMapping("/history")
     public ResponseEntity<List<TaskHistoryEntry>> getTaskHistory() {
         return ResponseEntity.ok(loadTaskService.getTaskHistory());
     }
 
+    @Operation(summary = "Get queue status", description = "Returns current queue size and capacity.")
     @GetMapping("/queue")
     public ResponseEntity<QueueStatusResponse> getQueueStatus() {
         return ResponseEntity.ok(loadTaskService.getQueueStatus());
     }
 
+    @Operation(summary = "Get overall metrics", description = "Returns global execution metrics across all tasks.")
     @GetMapping("/metrics")
     public ResponseEntity<TaskMetricsResponse> getMetrics() {
         return ResponseEntity.ok(loadTaskService.getMetrics());
     }
 
+    @Operation(summary = "Get task metrics", description = "Returns live metrics for a specific task.")
     @GetMapping("/{taskId}/metrics")
-    public ResponseEntity<?> getTaskMetrics(@PathVariable("taskId") UUID taskId) {
+    public ResponseEntity<?> getTaskMetrics(
+            @Parameter(description = "UUID of the task") @PathVariable UUID taskId) {
         return metricsRegistry.getSnapshot(taskId)
                 .<ResponseEntity<?>>map(snapshot -> ResponseEntity.ok(mapToResponse(snapshot)))
                 .orElseGet(() -> ResponseEntity.status(HttpStatus.NOT_FOUND)
-                        .body(Map.of("error", "Metrics not found for task: " + taskId)));
+                        .body(new ErrorResponse("Not Found", "Metrics not found for task: " + taskId)));
     }
 
+    @Operation(summary = "Get task report", description = "Returns final execution report for a completed task.")
     @GetMapping("/{taskId}/report")
-    public ResponseEntity<?> getTaskReport(@PathVariable("taskId") UUID taskId) {
+    public ResponseEntity<?> getTaskReport(
+            @Parameter(description = "UUID of the task") @PathVariable UUID taskId) {
         return metricsRegistry.getReport(taskId)
                 .<ResponseEntity<?>>map(ResponseEntity::ok)
                 .orElseGet(() -> ResponseEntity.status(HttpStatus.NOT_FOUND)
-                        .body(Map.of("error", "Report not found for task: " + taskId)));
+                        .body(new ErrorResponse("Not Found", "Report not found for task: " + taskId)));
     }
 
+    @Operation(summary = "Get supported task types", description = "Returns a set of all supported task types.")
     @GetMapping("/types")
     public ResponseEntity<Set<String>> getSupportedTaskTypes() {
         return ResponseEntity.ok(loadTaskService.getSupportedTaskTypes());
     }
 
+    @Operation(summary = "Health check", description = "Simple health endpoint to verify the service is running.")
     @GetMapping("/health")
     public ResponseEntity<HealthResponse> health() {
-        String status = loadTaskService.isHealthy() ? "UP" : "DOWN";
-        return ResponseEntity.ok(new HealthResponse(status));
-    }
-
-    private LoadTask mapToDomain(TaskSubmissionRequest request) {
-        TaskType taskType;
-        try {
-            taskType = TaskType.fromValue(request.getTaskType());
-        } catch (IllegalArgumentException ex) {
-            log.warn("Unsupported taskType {}", request.getTaskType());
-            throw new IllegalArgumentException("Unsupported taskType: " + request.getTaskType());
-        }
-
-        Map<String, Object> data = request.getData();
-        if (data == null || data.isEmpty()) {
-            throw new IllegalArgumentException("data payload must be provided");
-        }
-
-        UUID taskId = UUID.randomUUID();
-        Instant createdAt = Instant.now();
-        request.setTaskId(taskId.toString());
-        request.setCreatedAt(createdAt);
-        return new LoadTask(taskId, taskType, createdAt, data);
+        return ResponseEntity.ok(new HealthResponse(loadTaskService.isHealthy() ? "UP" : "DOWN"));
     }
 
     private HttpStatus determineSubmissionHttpStatus(TaskSubmissionOutcome outcome) {
@@ -195,7 +190,7 @@ public class LoadTaskController {
 
     private TaskLiveMetricsResponse mapToResponse(LoadMetrics.LoadSnapshot snapshot) {
         TaskLiveMetricsResponse resp = new TaskLiveMetricsResponse();
-        LoadMetrics.TaskConfig cfg = snapshot.config();
+        var cfg = snapshot.config();
         resp.setTaskId(cfg.taskId());
         resp.setTaskType(cfg.taskType());
         resp.setBaseUrl(cfg.baseUrl());
@@ -210,7 +205,6 @@ public class LoadTaskController {
         resp.setRequestsPerIteration(cfg.requestsPerIteration());
         resp.setExpectedTotalRequests(cfg.expectedTotalRequests());
         resp.setExpectedRps(cfg.expectedRps());
-
         resp.setUsersStarted(snapshot.usersStarted());
         resp.setUsersCompleted(snapshot.usersCompleted());
         resp.setTotalRequests(snapshot.totalRequests());
